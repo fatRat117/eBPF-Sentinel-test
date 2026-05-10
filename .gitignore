@@ -1,0 +1,17 @@
+# Binary executables
+ebpf-sentinel
+
+# SQLite database files
+sentinel.db
+sentinel.db-journal
+sentinel.db-*
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS generated files
+.DS_Store
+Thumbs.db
