@@ -1,6 +1,7 @@
 package models
 
 import (
+	"errors"
 	"time"
 
 	"gorm.io/driver/sqlite"
@@ -34,7 +35,6 @@ type NetworkEvent struct {
 	CreatedAt  time.Time `json:"created_at"`           // 事件创建时间
 }
 
-
 // DB 全局数据库连接实例
 var DB *gorm.DB
 
@@ -59,12 +59,18 @@ func InitDB() (*gorm.DB, error) {
 
 // CreateEvent 创建新的进程事件记录
 func CreateEvent(event *ExecveEvent) error {
+	if DB == nil {
+		return errors.New("database is not initialized")
+	}
 	return DB.Create(event).Error
 }
 
 // GetRecentEvents 获取最近的N条进程事件
 // 按时间倒序排列，最新的在前面
 func GetRecentEvents(limit int) ([]ExecveEvent, error) {
+	if DB == nil {
+		return nil, errors.New("database is not initialized")
+	}
 	var events []ExecveEvent
 	result := DB.Order("created_at desc").Limit(limit).Find(&events)
 	return events, result.Error
@@ -72,11 +78,17 @@ func GetRecentEvents(limit int) ([]ExecveEvent, error) {
 
 // CreateNetworkEvent 创建新的网络事件记录
 func CreateNetworkEvent(event *NetworkEvent) error {
+	if DB == nil {
+		return errors.New("database is not initialized")
+	}
 	return DB.Create(event).Error
 }
 
 // GetRecentNetworkEvents 获取最近的N条网络事件
 func GetRecentNetworkEvents(limit int) ([]NetworkEvent, error) {
+	if DB == nil {
+		return nil, errors.New("database is not initialized")
+	}
 	var events []NetworkEvent
 	result := DB.Order("created_at desc").Limit(limit).Find(&events)
 	return events, result.Error

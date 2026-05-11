@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/net"
 )
 
@@ -113,6 +114,8 @@ func (p *SystemMonitorPlugin) collectStats() {
 	var cpuUsage float64
 	if GetCPUUsage != nil {
 		cpuUsage = GetCPUUsage()
+	} else if usage, err := cpu.Percent(0, false); err == nil && len(usage) > 0 {
+		cpuUsage = usage[0]
 	}
 
 	// 采集网络速度
@@ -170,6 +173,14 @@ func (p *SystemMonitorPlugin) calculateNetSpeed() (float64, float64) {
 			lastBytesIn += lastStat.BytesRecv
 			lastBytesOut += lastStat.BytesSent
 		}
+	}
+
+	if totalBytesIn < lastBytesIn || totalBytesOut < lastBytesOut {
+		for _, stat := range stats {
+			p.lastNetStats[stat.Name] = stat
+		}
+		p.lastNetTime = now
+		return 0, 0
 	}
 
 	// 计算速度（KB/s）

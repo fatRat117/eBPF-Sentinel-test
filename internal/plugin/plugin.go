@@ -1,6 +1,10 @@
 package plugin
 
 import (
+	"errors"
+	"fmt"
+	"sync"
+
 	"github.com/cilium/ebpf/link"
 )
 
@@ -78,6 +82,7 @@ func (bp *BasePlugin) Detach() error {
 // 统一管理所有插件的生命周期，包括加载、挂载、启动和停止
 type Manager struct {
 	plugins map[string]Plugin // 插件映射表，key为插件名称
+	mu      sync.RWMutex      // 保护插件映射 / Protects plugin map
 }
 
 // NewManager 创建插件管理器
@@ -89,19 +94,38 @@ func NewManager() *Manager {
 
 // Register 注册插件到管理器
 // 注册后可以通过管理器统一控制插件
-func (m *Manager) Register(p Plugin) {
+func (m *Manager) Register(p Plugin) error {
+	if p == nil {
+		return errors.New("plugin is nil")
+	}
+	name := p.Name()
+	if name == "" {
+		return errors.New("plugin name is empty")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.plugins[name]; exists {
+		return fmt.Errorf("plugin %q already registered", name)
+	}
 	m.plugins[p.Name()] = p
+	return nil
 }
 
 // Get 获取指定名称的插件
 // 返回插件实例和是否存在标志
 func (m *Manager) Get(name string) (Plugin, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	p, ok := m.plugins[name]
 	return p, ok
 }
 
 // List 列出所有已注册的插件
 func (m *Manager) List() []Plugin {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	list := make([]Plugin, 0, len(m.plugins))
 	for _, p := range m.plugins {
 		list = append(list, p)
@@ -112,9 +136,10 @@ func (m *Manager) List() []Plugin {
 // LoadAll 加载所有插件的eBPF对象
 // 依次调用每个插件的Load方法
 func (m *Manager) LoadAll() error {
-	for _, p := range m.plugins {
+	plugins := m.List()
+	for _, p := range plugins {
 		if err := p.Load(); err != nil {
-			return err
+			return fmt.Errorf("load plugin %q: %w", p.Name(), err)
 		}
 	}
 	return nil
@@ -123,20 +148,29 @@ func (m *Manager) LoadAll() error {
 // AttachAll 挂载所有插件的eBPF程序
 // 依次调用每个插件的Attach方法
 func (m *Manager) AttachAll() error {
-	for _, p := range m.plugins {
+	plugins := m.List()
+	for _, p := range plugins {
 		if err := p.Attach(); err != nil {
-			return err
+			return fmt.Errorf("attach plugin %q: %w", p.Name(), err)
 		}
 	}
 	return nil
 }
 
+// StartAll 启动所有插件 / Starts all plugins in independent goroutines.
+func (m *Manager) StartAll(eventChan chan<- *Event) {
+	for _, p := range m.List() {
+		go p.Start(eventChan)
+	}
+}
+
 // DetachAll 卸载所有插件的eBPF程序
 // 依次调用每个插件的Detach方法
 func (m *Manager) DetachAll() error {
-	for _, p := range m.plugins {
+	plugins := m.List()
+	for _, p := range plugins {
 		if err := p.Detach(); err != nil {
-			return err
+			return fmt.Errorf("detach plugin %q: %w", p.Name(), err)
 		}
 	}
 	return nil
@@ -145,9 +179,10 @@ func (m *Manager) DetachAll() error {
 // CloseAll 关闭所有插件并释放资源
 // 依次调用每个插件的Close方法
 func (m *Manager) CloseAll() error {
-	for _, p := range m.plugins {
+	plugins := m.List()
+	for _, p := range plugins {
 		if err := p.Close(); err != nil {
-			return err
+			return fmt.Errorf("close plugin %q: %w", p.Name(), err)
 		}
 	}
 	return nil

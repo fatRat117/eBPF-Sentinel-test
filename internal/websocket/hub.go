@@ -69,7 +69,7 @@ func (h *Hub) Run() {
 
 		// 广播消息给所有客户端
 		case message := <-h.broadcast:
-			h.mu.RLock()
+			h.mu.Lock()
 			for client := range h.clients {
 				select {
 				// 尝试发送消息
@@ -80,7 +80,7 @@ func (h *Hub) Run() {
 					delete(h.clients, client)
 				}
 			}
-			h.mu.RUnlock()
+			h.mu.Unlock()
 		}
 	}
 }
