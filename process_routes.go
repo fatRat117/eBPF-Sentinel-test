@@ -50,11 +50,11 @@ func registerProcessRoutes(r *gin.Engine) {
 		c.JSON(http.StatusOK, gin.H{"processes": result})
 	})
 
-	r.POST("/api/process/kill/:pid", func(c *gin.Context) {
+	r.POST("/api/process/kill/:pid", requireMutationAccess(), func(c *gin.Context) {
 		killProcess(c, syscall.SIGTERM, "SIGTERM", "Process terminated")
 	})
 
-	r.POST("/api/process/kill/:pid/force", func(c *gin.Context) {
+	r.POST("/api/process/kill/:pid/force", requireMutationAccess(), func(c *gin.Context) {
 		killProcess(c, syscall.SIGKILL, "SIGKILL", "Process killed")
 	})
 }

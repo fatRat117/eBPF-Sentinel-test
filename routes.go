@@ -36,23 +36,29 @@ func setupRoutes(r *gin.Engine, hub *websocket.Hub) {
 		})
 	})
 
-	r.POST("/api/policy/execve/:enabled", func(c *gin.Context) {
+	r.POST("/api/policy/execve/:enabled", requireMutationAccess(), func(c *gin.Context) {
 		enabled, err := strconv.ParseBool(c.Param("enabled"))
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid enabled value"})
 			return
 		}
-		setExecveMonitoringEnabled(enabled)
+		if err := setExecveMonitoringEnabled(enabled); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"execve_enabled": enabled})
 	})
 
-	r.POST("/api/policy/network/:enabled", func(c *gin.Context) {
+	r.POST("/api/policy/network/:enabled", requireMutationAccess(), func(c *gin.Context) {
 		enabled, err := strconv.ParseBool(c.Param("enabled"))
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid enabled value"})
 			return
 		}
-		setNetworkMonitoringEnabled(enabled)
+		if err := setNetworkMonitoringEnabled(enabled); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"network_enabled": enabled})
 	})
 

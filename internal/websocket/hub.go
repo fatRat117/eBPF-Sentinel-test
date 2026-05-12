@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/url"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -27,10 +28,18 @@ type Client struct {
 }
 
 // WebSocket升级器配置
-// CheckOrigin允许所有来源（生产环境应该限制）
+// 浏览器连接仅接受同源 Origin；非浏览器客户端通常不带 Origin。
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		return true // 允许所有来源
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true
+		}
+		parsed, err := url.Parse(origin)
+		if err != nil {
+			return false
+		}
+		return parsed.Host == r.Host
 	},
 }
 
