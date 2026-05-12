@@ -8,6 +8,12 @@
         let eventCountLastSecond = 0;
         let lastRateUpdate = Date.now();
         
+        // 策略状态（客户端缓存，避免突显已停用的事件）
+        let policyState = {
+            execveEnabled: true,
+            networkEnabled: true
+        };
+
         // 系统指标
         let systemStats = {
             cpuUsage: 0,
@@ -93,6 +99,10 @@
                 updateSystemStats(data.data);
                 return;
             }
+
+            // Client-side gate: drop events for disabled monitors
+            if (data.type === 'execve' && !policyState.execveEnabled) return;
+            if (data.type === 'network' && !policyState.networkEnabled) return;
 
             eventCountLastSecond++;
 
@@ -235,10 +245,18 @@
         
         // ========== 进程治理 ==========
         function killProcess(pid, comm) {
+            if (!policyState.execveEnabled) {
+                alert('进程管理已被策略禁用');
+                return;
+            }
+
             showConfirm(`确定要终止进程 "${comm}" (PID: ${pid}) 吗？`, () => {
                 fetch(`/api/process/kill/${pid}`, { method: 'POST' })
                     .then(res => res.json())
                     .then(data => {
+                        if (data.error) {
+                            throw new Error(data.error);
+                        }
                         alert(data.message || '操作成功');
                     })
                     .catch(err => {
@@ -248,10 +266,18 @@
         }
         
         function forceKillProcess(pid, comm) {
+            if (!policyState.execveEnabled) {
+                alert('进程管理已被策略禁用');
+                return;
+            }
+
             showConfirm(`确定要强制终止进程 "${comm}" (PID: ${pid}) 吗？此操作不可恢复。`, () => {
                 fetch(`/api/process/kill/${pid}/force`, { method: 'POST' })
                     .then(res => res.json())
                     .then(data => {
+                        if (data.error) {
+                            throw new Error(data.error);
+                        }
                         alert(data.message || '操作成功');
                     })
                     .catch(err => {
@@ -269,9 +295,23 @@
         let processSearchQuery = '';
 
         function loadProcesses() {
+            if (!policyState.execveEnabled) {
+                processes = [];
+                applyFilterAndSort();
+                return;
+            }
+
             fetch('/api/processes')
                 .then(res => res.json())
                 .then(data => {
+                    if (data.error) {
+                        throw new Error(data.error);
+                    }
+                    if (data.process_management_enabled === false) {
+                        policyState.execveEnabled = false;
+                        updateProcessPolicyState(false);
+                        return;
+                    }
                     processes = data.processes || [];
                     applyFilterAndSort();
                 })
@@ -318,9 +358,13 @@
             if (filteredProcesses.length === 0) {
                 tbody.innerHTML = '';
                 emptyState.style.display = 'block';
-                emptyState.innerHTML = processSearchQuery
-                    ? '<div class="empty-state-icon">🔍</div><p>未找到匹配的进程</p>'
-                    : '<div class="empty-state-icon">⚙️</div><p>加载进程中...</p>';
+                if (!policyState.execveEnabled) {
+                    emptyState.innerHTML = '<div class="empty-state-icon">⚙️</div><p>进程管理已被策略禁用</p>';
+                } else {
+                    emptyState.innerHTML = processSearchQuery
+                        ? '<div class="empty-state-icon">🔍</div><p>未找到匹配的进程</p>'
+                        : '<div class="empty-state-icon">⚙️</div><p>加载进程中...</p>';
+                }
                 countEl.textContent = '0 / ' + processes.length + ' processes';
                 return;
             }
@@ -478,6 +522,11 @@
         }
 
         function startProcessPolling() {
+            if (!policyState.execveEnabled) {
+                processes = [];
+                applyFilterAndSort();
+                return;
+            }
             if (processPollInterval) return;
             loadProcesses();
             processPollInterval = setInterval(loadProcesses, 5000);
@@ -495,9 +544,10 @@
             fetch('/api/policy/status')
                 .then(res => res.json())
                 .then(data => {
-                    document.getElementById('execveToggle').checked = data.execve_enabled;
+                    policyState.execveEnabled = data.execve_enabled;
+                    policyState.networkEnabled = data.network_enabled;
+                    updateProcessPolicyState(data.execve_enabled);
                     document.getElementById('networkToggle').checked = data.network_enabled;
-                    updateStatusBadge('execve', data.execve_enabled);
                     updateStatusBadge('network', data.network_enabled);
                 })
                 .catch(err => console.error('Failed to load policy status:', err));
@@ -507,7 +557,10 @@
             fetch(`/api/policy/execve/${enabled}`, { method: 'POST' })
                 .then(res => res.json())
                 .then(data => {
-                    updateStatusBadge('execve', data.execve_enabled);
+                    if (data.error) {
+                        throw new Error(data.error);
+                    }
+                    updateProcessPolicyState(data.execve_enabled);
                 })
                 .catch(err => {
                     alert('操作失败: ' + err.message);
@@ -519,6 +572,11 @@
             fetch(`/api/policy/network/${enabled}`, { method: 'POST' })
                 .then(res => res.json())
                 .then(data => {
+                    if (data.error) {
+                        throw new Error(data.error);
+                    }
+                    policyState.networkEnabled = data.network_enabled;
+                    document.getElementById('networkToggle').checked = data.network_enabled;
                     updateStatusBadge('network', data.network_enabled);
                 })
                 .catch(err => {
@@ -535,6 +593,24 @@
             } else {
                 badge.className = 'status-badge status-disabled';
                 badge.textContent = '已禁用';
+            }
+        }
+
+        function updateProcessPolicyState(enabled) {
+            policyState.execveEnabled = enabled;
+            document.getElementById('execveToggle').checked = enabled;
+            updateStatusBadge('execve', enabled);
+
+            if (!enabled) {
+                stopProcessPolling();
+                processes = [];
+                filteredProcesses = [];
+                renderProcesses();
+                return;
+            }
+
+            if (currentTab === 'execve') {
+                startProcessPolling();
             }
         }
         
