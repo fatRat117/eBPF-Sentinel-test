@@ -52,6 +52,14 @@ struct {
     __type(value, u8);  // 1表示在白名单中
 } ip_whitelist SEC(".maps");
 
+// 白名单是否启用。默认关闭时不做白名单过滤。
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, u32);
+} ip_whitelist_enabled SEC(".maps");
+
 // 端口白名单Map - 存储允许监控的端口
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -59,6 +67,14 @@ struct {
     __type(key, u16);   // 端口号
     __type(value, u8);  // 1表示在白名单中
 } port_whitelist SEC(".maps");
+
+// 端口白名单是否启用。默认关闭时不做白名单过滤。
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, u32);
+} port_whitelist_enabled SEC(".maps");
 
 // 全局开关 - 控制网络监控是否启用
 struct {
@@ -182,9 +198,13 @@ static __always_inline bool should_sample(u32 direction) {
  * @return true 如果在白名单中或白名单为空
  */
 static __always_inline bool is_ip_whitelisted(u32 ip) {
-    // 如果白名单为空，允许所有IP
+    u32 key = 0;
+    u32 *enabled = bpf_map_lookup_elem(&ip_whitelist_enabled, &key);
+    if (enabled == NULL || *enabled == 0)
+        return true;
+
     u8 *value = bpf_map_lookup_elem(&ip_whitelist, &ip);
-    return value == NULL || *value == 1;
+    return value != NULL && *value == 1;
 }
 
 /**
@@ -193,8 +213,13 @@ static __always_inline bool is_ip_whitelisted(u32 ip) {
  * @return true 如果在白名单中或白名单为空
  */
 static __always_inline bool is_port_whitelisted(u16 port) {
+    u32 key = 0;
+    u32 *enabled = bpf_map_lookup_elem(&port_whitelist_enabled, &key);
+    if (enabled == NULL || *enabled == 0)
+        return true;
+
     u8 *value = bpf_map_lookup_elem(&port_whitelist, &port);
-    return value == NULL || *value == 1;
+    return value != NULL && *value == 1;
 }
 
 /**
