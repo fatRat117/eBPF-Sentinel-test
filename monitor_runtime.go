@@ -7,13 +7,13 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
-	"github.com/ebpf-sentinel/internal/models"
-	"github.com/ebpf-sentinel/internal/websocket"
+	"github.com/ebpf-sentinel/internal/plugin"
 )
 
 var (
@@ -32,27 +32,30 @@ var (
 )
 
 // startEBPFMonitors 加载并启动内置eBPF监控 / Starts built-in eBPF monitors and returns CPU usage callback.
-func startEBPFMonitors(hub *websocket.Hub) func() float64 {
+func startEBPFMonitors(eventChan chan<- *plugin.Event) func() float64 {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Printf("[warn] failed to remove memlock limit: %v", err)
 		log.Println("[warn] eBPF monitoring disabled (requires root)")
 	}
 
-	startExecveMonitor(hub)
-	startNetworkMonitor(hub)
+	startExecveMonitor(eventChan)
+	startNetworkMonitor(eventChan)
 	if startCPUMonitor() {
 		return getCPUUsage
 	}
 	return nil
 }
 
-func startExecveMonitor(hub *websocket.Hub) {
+func startExecveMonitor(eventChan chan<- *plugin.Event) {
 	execveObjs = &execveObjects{}
 	if err := loadExecveObjects(execveObjs, nil); err != nil {
 		log.Printf("[execve] failed to load execve objects: %v", err)
 		log.Println("[execve] execve monitoring disabled (requires root)")
 		execveObjs = nil
 		return
+	}
+	if err := syncExecveMonitoringMap(isExecveMonitoringEnabled()); err != nil {
+		log.Printf("[execve] failed to sync monitoring map: %v", err)
 	}
 
 	execveTp, err := link.Tracepoint("syscalls", "sys_enter_execve", execveObjs.TracepointExecve, nil)
@@ -74,10 +77,10 @@ func startExecveMonitor(hub *websocket.Hub) {
 		return
 	}
 
-	go readExecveEvents(execveRd, hub)
+	go readExecveEvents(execveRd, eventChan)
 }
 
-func readExecveEvents(rd *ringbuf.Reader, hub *websocket.Hub) {
+func readExecveEvents(rd *ringbuf.Reader, eventChan chan<- *plugin.Event) {
 	for {
 		record, err := rd.Read()
 		if err != nil {
@@ -98,37 +101,35 @@ func readExecveEvents(rd *ringbuf.Reader, hub *websocket.Hub) {
 		comm := string(bytes.Trim(event.Comm[:], "\x00"))
 		argv0 := string(bytes.Trim(event.Argv0[:], "\x00"))
 
-		dbEvent := &models.ExecveEvent{
-			PID:   event.PID,
-			PPID:  event.PPID,
-			Comm:  comm,
-			Argv0: argv0,
-		}
-		if err := models.CreateEvent(dbEvent); err != nil {
-			log.Printf("[execve] failed to save event: %v", err)
-		}
-
-		hub.Broadcast(map[string]interface{}{
-			"type": "execve",
-			"data": map[string]interface{}{
+		select {
+		case eventChan <- &plugin.Event{
+			Type:      "execve",
+			Timestamp: time.Now().Unix(),
+			Data: map[string]interface{}{
 				"pid":   event.PID,
 				"ppid":  event.PPID,
 				"comm":  comm,
 				"argv0": argv0,
 			},
-		})
+		}:
+		default:
+			log.Println("[execve] event channel full, dropping event")
+		}
 
 		log.Printf("[execve] PID=%d PPID=%d Comm=%s Argv0=%s", event.PID, event.PPID, comm, argv0)
 	}
 }
 
-func startNetworkMonitor(hub *websocket.Hub) {
+func startNetworkMonitor(eventChan chan<- *plugin.Event) {
 	networkObjs = &networkObjects{}
 	if err := loadNetworkObjects(networkObjs, nil); err != nil {
 		log.Printf("[network] failed to load network objects: %v", err)
 		log.Println("[network] Network monitoring disabled")
 		networkObjs = nil
 		return
+	}
+	if err := syncNetworkMonitoringMap(isNetworkMonitoringEnabled()); err != nil {
+		log.Printf("[network] failed to sync monitoring map: %v", err)
 	}
 
 	interfaces := getNetworkInterfaces()
@@ -185,10 +186,10 @@ func startNetworkMonitor(hub *websocket.Hub) {
 		return
 	}
 
-	go readNetworkEvents(networkRd, hub)
+	go readNetworkEvents(networkRd, eventChan)
 }
 
-func readNetworkEvents(rd *ringbuf.Reader, hub *websocket.Hub) {
+func readNetworkEvents(rd *ringbuf.Reader, eventChan chan<- *plugin.Event) {
 	for {
 		record, err := rd.Read()
 		if err != nil {
@@ -223,35 +224,27 @@ func readNetworkEvents(rd *ringbuf.Reader, hub *websocket.Hub) {
 			direction = "egress"
 		}
 
-		dbEvent := &models.NetworkEvent{
-			PID:        event.PID,
-			SrcIP:      srcIP,
-			DstIP:      dstIP,
-			SrcPort:    event.SrcPort,
-			DstPort:    event.DstPort,
-			Protocol:   event.Protocol,
-			Direction:  event.Direction,
-			PacketSize: event.PacketSize,
-			Comm:       comm,
-		}
-		if err := models.CreateNetworkEvent(dbEvent); err != nil {
-			log.Printf("[network] failed to save event: %v", err)
-		}
-
-		hub.Broadcast(map[string]interface{}{
-			"type": "network",
-			"data": map[string]interface{}{
-				"pid":         event.PID,
-				"src_ip":      srcIP,
-				"dst_ip":      dstIP,
-				"src_port":    event.SrcPort,
-				"dst_port":    event.DstPort,
-				"protocol":    proto,
-				"direction":   direction,
-				"packet_size": event.PacketSize,
-				"comm":        comm,
+		select {
+		case eventChan <- &plugin.Event{
+			Type:      "network",
+			Timestamp: time.Now().Unix(),
+			Data: map[string]interface{}{
+				"pid":          event.PID,
+				"src_ip":       srcIP,
+				"dst_ip":       dstIP,
+				"src_port":     event.SrcPort,
+				"dst_port":     event.DstPort,
+				"protocol":     proto,
+				"protocol_id":  event.Protocol,
+				"direction":    direction,
+				"direction_id": event.Direction,
+				"packet_size":  event.PacketSize,
+				"comm":         comm,
 			},
-		})
+		}:
+		default:
+			log.Println("[network] event channel full, dropping event")
+		}
 
 		log.Printf("[network] %s %s PID=%d %s:%d -> %s:%d (%s) %d bytes",
 			direction, proto, event.PID, srcIP, event.SrcPort, dstIP, event.DstPort, comm, event.PacketSize)
