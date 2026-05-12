@@ -42,12 +42,23 @@ func registerProcessRoutes(r *gin.Engine) {
 	snapshotter := newProcessSnapshotter()
 
 	r.GET("/api/processes", func(c *gin.Context) {
+		if !isExecveMonitoringEnabled() {
+			c.JSON(http.StatusOK, gin.H{
+				"processes":                  []procInfo{},
+				"process_management_enabled": false,
+			})
+			return
+		}
+
 		result, err := snapshotter.List()
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"processes": result})
+		c.JSON(http.StatusOK, gin.H{
+			"processes":                  result,
+			"process_management_enabled": true,
+		})
 	})
 
 	r.POST("/api/process/kill/:pid", requireMutationAccess(), func(c *gin.Context) {
@@ -155,6 +166,11 @@ func (s *processSnapshotter) readProcess(p *process.Process, oldTimes map[int32]
 }
 
 func killProcess(c *gin.Context, signal syscall.Signal, signalName string, message string) {
+	if !isExecveMonitoringEnabled() {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Process management is disabled by policy"})
+		return
+	}
+
 	pid, err := strconv.Atoi(c.Param("pid"))
 	if err != nil || pid <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid PID"})

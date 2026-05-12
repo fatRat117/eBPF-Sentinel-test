@@ -39,6 +39,18 @@ func main() {
 
 func dispatchPluginEvents(hub *websocket.Hub, eventChan <-chan *plugin.Event) {
 	for event := range eventChan {
+		// Defense-in-depth: respect policy toggles even if upstream filtering misses.
+		switch event.Type {
+		case "execve":
+			if !isExecveMonitoringEnabled() {
+				continue
+			}
+		case "network":
+			if !isNetworkMonitoringEnabled() {
+				continue
+			}
+		}
+
 		persistEvent(event)
 		hub.Broadcast(map[string]interface{}{
 			"type":      event.Type,
