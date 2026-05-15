@@ -137,6 +137,21 @@
                 网络事件
                 <span style="font-size: 0.875rem; color: #64748b;">(TCP/UDP/ICMP)</span>
             </h2>
+            <div class="network-speed-panel">
+                <div class="network-speed-header">
+                    <div>
+                        <h3>网速趋势</h3>
+                        <span>过去 60 秒</span>
+                    </div>
+                    <div class="chart-legend">
+                        <span><i class="legend-in"></i>下载</span>
+                        <span><i class="legend-out"></i>上传</span>
+                    </div>
+                </div>
+                <div class="network-speed-chart">
+                    <canvas id="networkSpeedChart" width="1200" height="260"></canvas>
+                </div>
+            </div>
             <div class="events-container">
                 <table id="networkTable">
                     <thead>

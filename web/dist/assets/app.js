@@ -20,6 +20,9 @@
             netSpeedIn: 0,
             netSpeedOut: 0
         };
+
+        const networkSpeedHistoryLimit = 60;
+        let networkSpeedHistory = [];
         
         // ========== WebSocket连接 ==========
         function connect() {
@@ -84,6 +87,10 @@
             } else {
                 stopProcessPolling();
             }
+
+            if (tab === 'network') {
+                drawNetworkSpeedChart();
+            }
         }
         
         function getTabIndex(tab) {
@@ -129,6 +136,8 @@
         }
         
         function updateSystemStats(data) {
+            let hasNetworkSpeed = false;
+
             // 更新CPU使用率
             if (data.cpu_usage !== undefined) {
                 systemStats.cpuUsage = parseFloat(data.cpu_usage);
@@ -139,13 +148,139 @@
             if (data.net_speed_in !== undefined) {
                 systemStats.netSpeedIn = parseFloat(data.net_speed_in);
                 document.getElementById('netSpeedIn').textContent = formatSpeed(systemStats.netSpeedIn);
+                hasNetworkSpeed = true;
             }
             
             // 更新上传速度
             if (data.net_speed_out !== undefined) {
                 systemStats.netSpeedOut = parseFloat(data.net_speed_out);
                 document.getElementById('netSpeedOut').textContent = formatSpeed(systemStats.netSpeedOut);
+                hasNetworkSpeed = true;
             }
+
+            if (hasNetworkSpeed) {
+                addNetworkSpeedSample(systemStats.netSpeedIn, systemStats.netSpeedOut);
+            }
+        }
+
+        function addNetworkSpeedSample(speedIn, speedOut) {
+            networkSpeedHistory.push({
+                timestamp: Date.now(),
+                in: Number.isFinite(speedIn) ? speedIn : 0,
+                out: Number.isFinite(speedOut) ? speedOut : 0
+            });
+
+            if (networkSpeedHistory.length > networkSpeedHistoryLimit) {
+                networkSpeedHistory = networkSpeedHistory.slice(-networkSpeedHistoryLimit);
+            }
+
+            drawNetworkSpeedChart();
+        }
+
+        function drawNetworkSpeedChart() {
+            const canvas = document.getElementById('networkSpeedChart');
+            if (!canvas) return;
+
+            const parent = canvas.parentElement;
+            const width = Math.max(parent.clientWidth, 320);
+            const height = Math.max(parent.clientHeight, 220);
+            const ratio = window.devicePixelRatio || 1;
+
+            if (canvas.width !== Math.floor(width * ratio) || canvas.height !== Math.floor(height * ratio)) {
+                canvas.width = Math.floor(width * ratio);
+                canvas.height = Math.floor(height * ratio);
+            }
+
+            const ctx = canvas.getContext('2d');
+            ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+            ctx.clearRect(0, 0, width, height);
+
+            const padding = { top: 18, right: 18, bottom: 28, left: 64 };
+            const chartWidth = width - padding.left - padding.right;
+            const chartHeight = height - padding.top - padding.bottom;
+            const maxSpeed = Math.max(1, ...networkSpeedHistory.flatMap(point => [point.in, point.out]));
+            const yMax = niceSpeedCeil(maxSpeed);
+
+            drawChartGrid(ctx, padding, chartWidth, chartHeight, yMax);
+
+            if (networkSpeedHistory.length === 0) {
+                ctx.fillStyle = '#64748b';
+                ctx.font = '13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('等待网速数据...', width / 2, height / 2);
+                return;
+            }
+
+            drawSpeedLine(ctx, networkSpeedHistory.map(point => point.in), '#22c55e', padding, chartWidth, chartHeight, yMax);
+            drawSpeedLine(ctx, networkSpeedHistory.map(point => point.out), '#38bdf8', padding, chartWidth, chartHeight, yMax);
+        }
+
+        function drawChartGrid(ctx, padding, chartWidth, chartHeight, yMax) {
+            ctx.strokeStyle = '#1e293b';
+            ctx.lineWidth = 1;
+            ctx.fillStyle = '#94a3b8';
+            ctx.font = '12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+            ctx.textAlign = 'right';
+            ctx.textBaseline = 'middle';
+
+            for (let i = 0; i <= 4; i++) {
+                const y = padding.top + (chartHeight / 4) * i;
+                const value = yMax - (yMax / 4) * i;
+
+                ctx.beginPath();
+                ctx.moveTo(padding.left, y);
+                ctx.lineTo(padding.left + chartWidth, y);
+                ctx.stroke();
+
+                ctx.fillText(formatSpeed(value), padding.left - 10, y);
+            }
+
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.fillStyle = '#64748b';
+            ctx.fillText('-60s', padding.left, padding.top + chartHeight + 10);
+            ctx.fillText('现在', padding.left + chartWidth, padding.top + chartHeight + 10);
+        }
+
+        function drawSpeedLine(ctx, values, color, padding, chartWidth, chartHeight, yMax) {
+            if (values.length === 0) return;
+
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.lineJoin = 'round';
+            ctx.lineCap = 'round';
+            ctx.beginPath();
+
+            values.forEach((value, index) => {
+                const denominator = Math.max(networkSpeedHistoryLimit - 1, 1);
+                const x = padding.left + chartWidth - ((values.length - 1 - index) / denominator) * chartWidth;
+                const y = padding.top + chartHeight - (Math.min(value, yMax) / yMax) * chartHeight;
+
+                if (index === 0) {
+                    ctx.moveTo(x, y);
+                } else {
+                    ctx.lineTo(x, y);
+                }
+            });
+
+            ctx.stroke();
+
+            const latest = values[values.length - 1];
+            const latestX = padding.left + chartWidth;
+            const latestY = padding.top + chartHeight - (Math.min(latest, yMax) / yMax) * chartHeight;
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(latestX, latestY, 3, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        function niceSpeedCeil(value) {
+            const magnitude = Math.pow(10, Math.floor(Math.log10(value)));
+            const normalized = value / magnitude;
+
+            if (normalized <= 2) return 2 * magnitude;
+            if (normalized <= 5) return 5 * magnitude;
+            return 10 * magnitude;
         }
         
         function formatSpeed(kbPerSec) {
@@ -695,6 +830,8 @@
         connect();
         setInterval(updateRate, 100);
         setInterval(updateStats, 1000);
+        window.addEventListener('resize', drawNetworkSpeedChart);
+        drawNetworkSpeedChart();
         
         // 初始化排序指示器
         setTimeout(() => {
