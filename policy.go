@@ -1,78 +1,69 @@
 package main
 
 import (
-	"fmt"
+	"errors"
 	"log"
 	"sync/atomic"
 
-	"github.com/cilium/ebpf"
+	"github.com/ebpf-sentinel/internal/plugin"
 )
 
 var (
-	execveEnabled  atomic.Bool
-	networkEnabled atomic.Bool
+	execvePolicyControl  plugin.PolicyControl
+	networkPolicyControl plugin.PolicyControl
+
+	execvePolicyFallback  atomic.Bool
+	networkPolicyFallback atomic.Bool
 )
 
 func init() {
-	execveEnabled.Store(true)
-	networkEnabled.Store(true)
+	execvePolicyFallback.Store(true)
+	networkPolicyFallback.Store(true)
+}
+
+func setPolicyControls(execveControl plugin.PolicyControl, networkControl plugin.PolicyControl) {
+	execvePolicyControl = execveControl
+	networkPolicyControl = networkControl
 }
 
 // isExecveMonitoringEnabled 检查execve监控是否启用 / Checks whether execve monitoring is enabled.
 func isExecveMonitoringEnabled() bool {
-	return execveEnabled.Load()
+	if execvePolicyControl != nil {
+		return execvePolicyControl.IsEnabled()
+	}
+	return execvePolicyFallback.Load()
 }
 
 // setExecveMonitoringEnabled 设置execve监控开关 / Updates the execve monitoring switch.
 func setExecveMonitoringEnabled(enabled bool) error {
-	if err := syncExecveMonitoringMap(enabled); err != nil {
+	execvePolicyFallback.Store(enabled)
+	if execvePolicyControl == nil {
+		return errors.New("execve policy control is not initialized")
+	}
+	if err := execvePolicyControl.SetEnabled(enabled); err != nil {
 		return err
 	}
-	execveEnabled.Store(enabled)
 	log.Printf("[Policy] Execve monitoring enabled: %v", enabled)
 	return nil
 }
 
 // isNetworkMonitoringEnabled 检查网络监控是否启用 / Checks whether network monitoring is enabled.
 func isNetworkMonitoringEnabled() bool {
-	return networkEnabled.Load()
+	if networkPolicyControl != nil {
+		return networkPolicyControl.IsEnabled()
+	}
+	return networkPolicyFallback.Load()
 }
 
 // setNetworkMonitoringEnabled 设置网络监控开关 / Updates the network monitoring switch.
 func setNetworkMonitoringEnabled(enabled bool) error {
-	if err := syncNetworkMonitoringMap(enabled); err != nil {
+	networkPolicyFallback.Store(enabled)
+	if networkPolicyControl == nil {
+		return errors.New("network policy control is not initialized")
+	}
+	if err := networkPolicyControl.SetEnabled(enabled); err != nil {
 		return err
 	}
-	networkEnabled.Store(enabled)
 	log.Printf("[Policy] Network monitoring enabled: %v", enabled)
 	return nil
-}
-
-func syncExecveMonitoringMap(enabled bool) error {
-	if execveObjs == nil || execveObjs.MonitoringEnabled == nil {
-		return nil
-	}
-	if err := updateToggleMap(execveObjs.MonitoringEnabled, enabled); err != nil {
-		return fmt.Errorf("sync execve monitoring map: %w", err)
-	}
-	return nil
-}
-
-func syncNetworkMonitoringMap(enabled bool) error {
-	if networkObjs == nil || networkObjs.NetMonitoringEnabled == nil {
-		return nil
-	}
-	if err := updateToggleMap(networkObjs.NetMonitoringEnabled, enabled); err != nil {
-		return fmt.Errorf("sync network monitoring map: %w", err)
-	}
-	return nil
-}
-
-func updateToggleMap(target *ebpf.Map, enabled bool) error {
-	var key uint32
-	var value uint32
-	if enabled {
-		value = 1
-	}
-	return target.Update(key, value, ebpf.UpdateAny)
 }

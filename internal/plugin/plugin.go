@@ -3,6 +3,7 @@ package plugin
 import (
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 
 	"github.com/cilium/ebpf/link"
@@ -139,7 +140,7 @@ func (m *Manager) LoadAll() error {
 	plugins := m.List()
 	for _, p := range plugins {
 		if err := p.Load(); err != nil {
-			return fmt.Errorf("load plugin %q: %w", p.Name(), err)
+			log.Printf("[%s] load skipped: %v", p.Name(), err)
 		}
 	}
 	return nil
@@ -151,7 +152,7 @@ func (m *Manager) AttachAll() error {
 	plugins := m.List()
 	for _, p := range plugins {
 		if err := p.Attach(); err != nil {
-			return fmt.Errorf("attach plugin %q: %w", p.Name(), err)
+			log.Printf("[%s] attach skipped: %v", p.Name(), err)
 		}
 	}
 	return nil
@@ -160,7 +161,11 @@ func (m *Manager) AttachAll() error {
 // StartAll 启动所有插件 / Starts all plugins in independent goroutines.
 func (m *Manager) StartAll(eventChan chan<- *Event) {
 	for _, p := range m.List() {
-		go p.Start(eventChan)
+		go func(p Plugin) {
+			if err := p.Start(eventChan); err != nil {
+				log.Printf("[%s] stopped: %v", p.Name(), err)
+			}
+		}(p)
 	}
 }
 

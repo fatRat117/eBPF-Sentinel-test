@@ -10,11 +10,6 @@ import (
 	"github.com/shirou/gopsutil/v3/net"
 )
 
-// GetCPUUsage 用于从eBPF获取CPU使用率的函数
-// 由main.go在加载eBPF程序后注入
-// 如果为nil，则回退到gopsutil方式
-var GetCPUUsage func() float64
-
 // SystemStats 系统统计信息
 type SystemStats struct {
 	CPUUsage    float64 `json:"cpu_usage"`     // CPU使用率（百分比）
@@ -26,9 +21,10 @@ type SystemStats struct {
 // 负责采集CPU使用率和网络速度等系统级指标
 type SystemMonitorPlugin struct {
 	BasePlugin
-	eventChan chan<- *Event
-	ctx       context.Context
-	cancel    context.CancelFunc
+	eventChan   chan<- *Event
+	ctx         context.Context
+	cancel      context.CancelFunc
+	cpuProvider func() float64
 
 	// 网络统计上一次的数据
 	lastNetStats map[string]net.IOCountersStat
@@ -36,12 +32,13 @@ type SystemMonitorPlugin struct {
 }
 
 // NewSystemMonitorPlugin 创建系统监控插件
-func NewSystemMonitorPlugin() *SystemMonitorPlugin {
+func NewSystemMonitorPlugin(cpuProvider func() float64) *SystemMonitorPlugin {
 	return &SystemMonitorPlugin{
 		BasePlugin: BasePlugin{
 			Name_:        "system",
 			Description_: "Monitor system metrics like CPU usage and network speed",
 		},
+		cpuProvider:  cpuProvider,
 		lastNetStats: make(map[string]net.IOCountersStat),
 	}
 }
@@ -112,8 +109,8 @@ func (p *SystemMonitorPlugin) initNetStats() {
 // collectStats 采集系统统计信息
 func (p *SystemMonitorPlugin) collectStats() {
 	var cpuUsage float64
-	if GetCPUUsage != nil {
-		cpuUsage = GetCPUUsage()
+	if p.cpuProvider != nil {
+		cpuUsage = p.cpuProvider()
 	} else if usage, err := cpu.Percent(0, false); err == nil && len(usage) > 0 {
 		cpuUsage = usage[0]
 	}

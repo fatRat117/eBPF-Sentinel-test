@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 
+	"github.com/cilium/ebpf"
 	"github.com/ebpf-sentinel/internal/models"
 	"github.com/ebpf-sentinel/internal/plugin"
 	"github.com/ebpf-sentinel/internal/websocket"
@@ -22,8 +23,25 @@ func main() {
 	eventChan := make(chan *plugin.Event, 256)
 	go dispatchPluginEvents(hub, eventChan)
 
-	cpuUsageFn := startEBPFMonitors(eventChan)
-	startSystemPlugin(eventChan, cpuUsageFn)
+	manager := plugin.NewManager()
+	execvePlugin := plugin.NewExecvePlugin(execveBPFProvider{})
+	networkPlugin := plugin.NewNetworkPlugin(networkBPFProvider{})
+	cpuPlugin := plugin.NewCPUPlugin(cpuBPFProvider{})
+	systemPlugin := plugin.NewSystemMonitorPlugin(cpuPlugin.GetCPUUsage)
+
+	setPolicyControls(execvePlugin, networkPlugin)
+	registerPlugin(manager, execvePlugin)
+	registerPlugin(manager, networkPlugin)
+	registerPlugin(manager, cpuPlugin)
+	registerPlugin(manager, systemPlugin)
+
+	if err := manager.LoadAll(); err != nil {
+		log.Printf("failed to load plugins: %v", err)
+	}
+	if err := manager.AttachAll(); err != nil {
+		log.Printf("failed to attach plugins: %v", err)
+	}
+	manager.StartAll(eventChan)
 
 	log.Println("eBPF Sentinel started! Monitoring execve syscalls, network traffic, and system metrics...")
 
@@ -35,6 +53,30 @@ func main() {
 	if err := r.Run(":8080"); err != nil {
 		log.Fatalf("failed to start server: %v", err)
 	}
+}
+
+func registerPlugin(manager *plugin.Manager, p plugin.Plugin) {
+	if err := manager.Register(p); err != nil {
+		log.Printf("failed to register plugin %q: %v", p.Name(), err)
+	}
+}
+
+type execveBPFProvider struct{}
+
+func (execveBPFProvider) LoadAndAssign(obj interface{}, opts *ebpf.CollectionOptions) error {
+	return loadExecveObjects(obj, opts)
+}
+
+type networkBPFProvider struct{}
+
+func (networkBPFProvider) LoadAndAssign(obj interface{}, opts *ebpf.CollectionOptions) error {
+	return loadNetworkObjects(obj, opts)
+}
+
+type cpuBPFProvider struct{}
+
+func (cpuBPFProvider) LoadAndAssign(obj interface{}, opts *ebpf.CollectionOptions) error {
+	return loadCpuObjects(obj, opts)
 }
 
 func dispatchPluginEvents(hub *websocket.Hub, eventChan <-chan *plugin.Event) {
@@ -107,28 +149,4 @@ func persistEvent(event *plugin.Event) {
 			log.Printf("[network] failed to save event: %v", err)
 		}
 	}
-}
-
-func startSystemPlugin(eventChan chan<- *plugin.Event, cpuUsageFn func() float64) {
-	if cpuUsageFn != nil {
-		plugin.GetCPUUsage = cpuUsageFn
-		log.Println("[cpu] eBPF CPU monitoring enabled for system plugin")
-	}
-
-	systemPlugin := plugin.NewSystemMonitorPlugin()
-	if err := systemPlugin.Load(); err != nil {
-		log.Printf("[system] Failed to load system plugin: %v", err)
-		return
-	}
-	if err := systemPlugin.Attach(); err != nil {
-		log.Printf("[system] Failed to attach system plugin: %v", err)
-		return
-	}
-
-	go func() {
-		if err := systemPlugin.Start(eventChan); err != nil {
-			log.Printf("[system] System plugin stopped: %v", err)
-		}
-	}()
-	log.Println("[system] System monitor plugin started")
 }

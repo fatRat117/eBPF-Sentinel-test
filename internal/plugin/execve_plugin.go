@@ -2,7 +2,10 @@ package plugin
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"log"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -12,152 +15,167 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 )
 
-// ExecveEvent 对应eBPF中的事件结构
-// 必须与ebpf/execve.c中的struct event完全匹配
-type ExecveEvent struct {
-	PID   uint32    // 进程ID
-	PPID  uint32    // 父进程ID
-	Comm  [16]byte  // 进程名（固定长度字节数组）
-	Argv0 [128]byte // 命令行参数（固定长度字节数组）
-}
-
-// execveObjects 由bpf2go生成的eBPF对象结构
-// 包含eBPF程序和Maps的引用
 type execveObjects struct {
-	TracepointExecve *ebpf.Program `ebpf:"tracepoint_execve"` // execve跟踪点程序
-	Events           *ebpf.Map     `ebpf:"events"`            // Ring Buffer事件Map
+	TracepointExecve  *ebpf.Program `ebpf:"tracepoint_execve"`
+	Events            *ebpf.Map     `ebpf:"events"`
+	MonitoringEnabled *ebpf.Map     `ebpf:"monitoring_enabled"`
 }
 
-// Close 关闭eBPF对象，释放资源
 func (o *execveObjects) Close() error {
+	var err error
 	if o.TracepointExecve != nil {
-		o.TracepointExecve.Close()
+		err = errors.Join(err, o.TracepointExecve.Close())
 	}
 	if o.Events != nil {
-		o.Events.Close()
+		err = errors.Join(err, o.Events.Close())
 	}
-	return nil
+	if o.MonitoringEnabled != nil {
+		err = errors.Join(err, o.MonitoringEnabled.Close())
+	}
+	return err
 }
 
-// ExecvePlugin execve监控插件
-// 监控系统中所有execve系统调用，记录进程创建事件
 type ExecvePlugin struct {
 	BasePlugin
-	objs      *execveObjects  // eBPF对象
-	reader    *ringbuf.Reader // Ring Buffer读取器
-	eventChan chan<- *Event   // 事件输出通道
+	provider BPFCollectionProvider
+	objs     *execveObjects
+	reader   *ringbuf.Reader
+	enabled  atomic.Bool
 }
 
-// NewExecvePlugin 创建execve插件实例
-func NewExecvePlugin() *ExecvePlugin {
-	return &ExecvePlugin{
+func NewExecvePlugin(provider BPFCollectionProvider) *ExecvePlugin {
+	p := &ExecvePlugin{
 		BasePlugin: BasePlugin{
 			Name_:        "execve",
 			Description_: "Monitor execve system calls - track process creation events",
 		},
+		provider: provider,
 	}
+	p.enabled.Store(true)
+	return p
 }
 
-// Load 加载eBPF对象到内核
-// 1. 移除内存限制
-// 2. 加载eBPF程序和Maps
 func (p *ExecvePlugin) Load() error {
-	// 移除内存限制（eBPF需要锁定内存）
+	if p.provider == nil {
+		return errors.New("execve BPF provider is nil")
+	}
 	if err := rlimit.RemoveMemlock(); err != nil {
-		return err
+		return fmt.Errorf("remove memlock: %w", err)
 	}
 
-	// 这里需要实际加载eBPF对象
-	// 由于bpf2go生成的代码在main包，我们需要重新组织代码结构
-	// 暂时使用占位符实现
-	log.Printf("[%s] Loading eBPF objects...", p.Name_)
+	objs := &execveObjects{}
+	if err := p.provider.LoadAndAssign(objs, nil); err != nil {
+		return fmt.Errorf("load execve objects: %w", err)
+	}
+	p.objs = objs
+	if err := p.syncMonitoringMap(p.IsEnabled()); err != nil {
+		return err
+	}
+	log.Printf("[%s] Execve monitoring enabled", p.Name())
 	return nil
 }
 
-// Attach 挂载eBPF程序到内核跟踪点
-// 将程序挂载到syscalls:sys_enter_execve跟踪点
 func (p *ExecvePlugin) Attach() error {
-	if p.objs == nil || p.objs.TracepointExecve == nil {
-		return nil // 占位符实现
+	if p.objs == nil {
+		return nil
 	}
-
-	// 挂载到execve系统调用入口
 	tp, err := link.Tracepoint("syscalls", "sys_enter_execve", p.objs.TracepointExecve, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("attach execve tracepoint: %w", err)
 	}
 	p.Links = append(p.Links, tp)
 
-	// 打开Ring Buffer用于读取事件
 	reader, err := ringbuf.NewReader(p.objs.Events)
 	if err != nil {
-		return err
+		return fmt.Errorf("open execve ring buffer: %w", err)
 	}
 	p.reader = reader
-
 	return nil
 }
 
-// Close 清理插件资源
-// 关闭Ring Buffer和eBPF对象
-func (p *ExecvePlugin) Close() error {
-	if p.reader != nil {
-		p.reader.Close()
-	}
-	if p.objs != nil {
-		p.objs.Close()
-	}
-	return nil
-}
-
-// Start 开始读取execve事件
-// 这是一个阻塞调用，应该在独立的goroutine中运行
-// 持续从Ring Buffer读取事件并发送到eventChan
 func (p *ExecvePlugin) Start(eventChan chan<- *Event) error {
-	p.eventChan = eventChan
-
 	if p.reader == nil {
-		return nil // 占位符实现
+		return nil
 	}
-
-	// 持续读取事件
 	for {
 		record, err := p.reader.Read()
 		if err != nil {
-			log.Printf("[%s] failed to read from ring buffer: %v", p.Name_, err)
-			return err
+			if errors.Is(err, ringbuf.ErrClosed) {
+				return nil
+			}
+			return fmt.Errorf("read execve ring buffer: %w", err)
 		}
-
-		// 解析事件数据
-		var e ExecveEvent
-		if len(record.RawSample) < 152 {
+		if len(record.RawSample) < ExecveEventSize {
 			continue
 		}
 
-		// 使用unsafe快速复制二进制数据
-		copy((*[152]byte)(unsafe.Pointer(&e))[:], record.RawSample)
+		var raw ExecveEventBinary
+		copy((*[ExecveEventSize]byte)(unsafe.Pointer(&raw))[:], record.RawSample[:ExecveEventSize])
+		if !p.IsEnabled() {
+			continue
+		}
 
-		// 将字节数组转换为字符串
-		comm := string(bytes.Trim(e.Comm[:], "\x00"))
-		argv0 := string(bytes.Trim(e.Argv0[:], "\x00"))
-
-		// 创建通用事件结构
-		event := &Event{
+		comm := string(bytes.Trim(raw.Comm[:], "\x00"))
+		argv0 := string(bytes.Trim(raw.Argv0[:], "\x00"))
+		select {
+		case eventChan <- &Event{
 			Type:      "execve",
 			Timestamp: time.Now().Unix(),
 			Data: map[string]interface{}{
-				"pid":   e.PID,
-				"ppid":  e.PPID,
+				"pid":   raw.PID,
+				"ppid":  raw.PPID,
 				"comm":  comm,
 				"argv0": argv0,
 			},
-		}
-
-		// 发送事件到通道（非阻塞）
-		select {
-		case eventChan <- event:
+		}:
 		default:
-			log.Printf("[%s] event channel full, dropping event", p.Name_)
+			log.Printf("[%s] event channel full, dropping event", p.Name())
 		}
 	}
+}
+
+func (p *ExecvePlugin) Detach() error {
+	return p.BasePlugin.Detach()
+}
+
+func (p *ExecvePlugin) Close() error {
+	var err error
+	if p.reader != nil {
+		err = errors.Join(err, p.reader.Close())
+		p.reader = nil
+	}
+	err = errors.Join(err, p.Detach())
+	if p.objs != nil {
+		err = errors.Join(err, p.objs.Close())
+		p.objs = nil
+	}
+	return err
+}
+
+func (p *ExecvePlugin) IsEnabled() bool {
+	return p.enabled.Load()
+}
+
+func (p *ExecvePlugin) SetEnabled(enabled bool) error {
+	if err := p.syncMonitoringMap(enabled); err != nil {
+		return err
+	}
+	p.enabled.Store(enabled)
+	log.Printf("[%s] Execve monitoring enabled: %v", p.Name(), enabled)
+	return nil
+}
+
+func (p *ExecvePlugin) syncMonitoringMap(enabled bool) error {
+	if p.objs == nil || p.objs.MonitoringEnabled == nil {
+		return nil
+	}
+	var key uint32
+	var value uint32
+	if enabled {
+		value = 1
+	}
+	if err := p.objs.MonitoringEnabled.Update(key, value, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("sync execve monitoring map: %w", err)
+	}
+	return nil
 }
