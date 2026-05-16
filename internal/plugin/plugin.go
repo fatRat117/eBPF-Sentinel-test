@@ -49,6 +49,12 @@ type Plugin interface {
 	Start(eventChan chan<- *Event) error
 }
 
+// EventObserver can be implemented by plugins that derive events from the
+// shared event stream, such as alerting plugins.
+type EventObserver interface {
+	HandleEvent(event *Event) []*Event
+}
+
 // BasePlugin 基础插件结构
 // 提供插件共用的字段和方法，具体插件可以嵌入此结构
 type BasePlugin struct {
@@ -132,6 +138,20 @@ func (m *Manager) List() []Plugin {
 		list = append(list, p)
 	}
 	return list
+}
+
+// Observers lists plugins that inspect events produced by other plugins.
+func (m *Manager) Observers() []EventObserver {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	observers := make([]EventObserver, 0)
+	for _, p := range m.plugins {
+		if observer, ok := p.(EventObserver); ok {
+			observers = append(observers, observer)
+		}
+	}
+	return observers
 }
 
 // LoadAll 加载所有插件的eBPF对象

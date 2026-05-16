@@ -111,8 +111,13 @@ func (p *SystemMonitorPlugin) collectStats() {
 	var cpuUsage float64
 	if p.cpuProvider != nil {
 		cpuUsage = p.cpuProvider()
-	} else if usage, err := cpu.Percent(0, false); err == nil && len(usage) > 0 {
-		cpuUsage = usage[0]
+	}
+	if cpuUsage <= 0 {
+		// Fall back when the eBPF CPU plugin is unavailable or has not produced
+		// counters yet. This keeps system alerts useful during partial startup.
+		if usage, err := cpu.Percent(0, false); err == nil && len(usage) > 0 {
+			cpuUsage = usage[0]
+		}
 	}
 
 	// 采集网络速度

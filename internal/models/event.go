@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -35,6 +36,17 @@ type NetworkEvent struct {
 	CreatedAt  time.Time `json:"created_at"`           // 事件创建时间
 }
 
+// AlertEvent stores alerts derived from collected runtime events.
+type AlertEvent struct {
+	ID         uint64    `json:"id" gorm:"primaryKey"`
+	RuleID     string    `json:"rule_id"`
+	Severity   string    `json:"severity"`
+	SourceType string    `json:"source_type"`
+	Message    string    `json:"message"`
+	Details    string    `json:"details"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
 // DB 全局数据库连接实例
 var DB *gorm.DB
 
@@ -48,13 +60,40 @@ func InitDB() (*gorm.DB, error) {
 
 	// 自动迁移表结构
 	// 如果表不存在则创建，如果字段有变化则更新
-	err = db.AutoMigrate(&ExecveEvent{}, &NetworkEvent{})
+	err = db.AutoMigrate(&ExecveEvent{}, &NetworkEvent{}, &AlertEvent{})
 	if err != nil {
 		return nil, err
 	}
 
 	DB = db
 	return db, nil
+}
+
+func CreateAlertEvent(event *AlertEvent) error {
+	if DB == nil {
+		return errors.New("database is not initialized")
+	}
+	return DB.Create(event).Error
+}
+
+func GetRecentAlertEvents(limit int) ([]AlertEvent, error) {
+	if DB == nil {
+		return nil, errors.New("database is not initialized")
+	}
+	var events []AlertEvent
+	result := DB.Order("created_at desc").Limit(limit).Find(&events)
+	return events, result.Error
+}
+
+func MarshalAlertDetails(details interface{}) string {
+	if details == nil {
+		return "{}"
+	}
+	data, err := json.Marshal(details)
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
 }
 
 // CreateEvent 创建新的进程事件记录

@@ -28,6 +28,10 @@
                 <h3>网络事件</h3>
                 <div class="value" id="networkEvents">0</div>
             </div>
+            <div class="stat-card alert-metric">
+                <h3>告警事件</h3>
+                <div class="value" id="alertEvents">0</div>
+            </div>
             <div class="stat-card system-metric">
                 <h3>CPU使用率</h3>
                 <div class="value" id="cpuUsage">0%</div>
@@ -68,6 +72,7 @@
             <div class="tab active" onclick="switchTab('all', this)">全部事件</div>
             <div class="tab" onclick="switchTab('execve', this)">进程监控</div>
             <div class="tab" onclick="switchTab('network', this)">网络事件</div>
+            <div class="tab" onclick="switchTab('alert', this)">告警中心</div>
             <div class="tab" onclick="switchTab('policy', this)">策略配置</div>
         </div>
 
@@ -173,6 +178,33 @@
                 <div id="networkEmptyState" class="empty-state">
                     <div class="empty-state-icon">🌐</div>
                     <p>等待网络事件...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- 告警中心 -->
+        <div id="alert-events" class="events-section hidden">
+            <h2>
+                告警中心
+                <span style="font-size: 0.875rem; color: #64748b;">(规则派生事件)</span>
+            </h2>
+            <div class="events-container">
+                <table id="alertTable">
+                    <thead>
+                        <tr>
+                            <th>级别</th>
+                            <th>时间</th>
+                            <th>规则</th>
+                            <th>来源</th>
+                            <th>消息</th>
+                        </tr>
+                    </thead>
+                    <tbody id="alertBody">
+                    </tbody>
+                </table>
+                <div id="alertEmptyState" class="empty-state">
+                    <div class="empty-state-icon">!</div>
+                    <p>暂无告警</p>
                 </div>
             </div>
         </div>

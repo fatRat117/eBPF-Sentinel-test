@@ -97,6 +97,18 @@
         .stat-card.system-metric .value {
             color: #34d399;
         }
+
+        .stat-card.alert-metric {
+            border-color: #f59e0b;
+        }
+
+        .stat-card.alert-metric h3 {
+            color: #f59e0b;
+        }
+
+        .stat-card.alert-metric .value {
+            color: #fbbf24;
+        }
         
         .controls {
             background: #1e293b;
@@ -359,6 +371,31 @@
         .badge-system {
             background: #f59e0b;
             color: white;
+        }
+
+        .badge-alert {
+            background: #ef4444;
+            color: white;
+        }
+
+        .badge-info {
+            background: #0ea5e9;
+            color: white;
+        }
+
+        .badge-warning {
+            background: #f59e0b;
+            color: #111827;
+        }
+
+        .badge-medium {
+            background: #ef4444;
+            color: white;
+        }
+
+        .badge-critical {
+            background: #7f1d1d;
+            color: #fecaca;
         }
         
         .badge-tcp {

@@ -3,6 +3,7 @@
         let allEvents = [];
         let execveEvents = [];
         let networkEvents = [];
+        let alertEvents = [];
         let currentTab = 'all';
         let startTime = Date.now();
         let eventCountLastSecond = 0;
@@ -37,6 +38,7 @@
                 console.log('WebSocket connected');
                 updateConnectionStatus('connected', '已连接');
                 loadPolicyStatus();
+                loadAlertHistory();
             };
             
             ws.onmessage = (event) => {
@@ -80,6 +82,7 @@
             document.getElementById('all-events').classList.toggle('hidden', tab !== 'all');
             document.getElementById('execve-events').classList.toggle('hidden', tab !== 'execve');
             document.getElementById('network-events').classList.toggle('hidden', tab !== 'network');
+            document.getElementById('alert-events').classList.toggle('hidden', tab !== 'alert');
             document.getElementById('policy-panel').classList.toggle('hidden', tab !== 'policy');
 
             if (tab === 'execve') {
@@ -94,7 +97,7 @@
         }
         
         function getTabIndex(tab) {
-            const tabs = ['all', 'execve', 'network', 'policy'];
+            const tabs = ['all', 'execve', 'network', 'alert', 'policy'];
             return tabs.indexOf(tab) + 1;
         }
         
@@ -129,6 +132,10 @@
                 networkEvents.unshift(event);
                 if (networkEvents.length > 500) networkEvents = networkEvents.slice(0, 500);
                 renderNetworkEvent(event);
+            } else if (data.type === 'alert') {
+                alertEvents.unshift(event);
+                if (alertEvents.length > 500) alertEvents = alertEvents.slice(0, 500);
+                renderAlertEvent(event);
             }
 
             renderAllEvent(event);
@@ -314,6 +321,8 @@
                 details = `PID=${event.pid} PPID=${event.ppid} ${escapeHtml(event.comm)}: ${escapeHtml(event.argv0)}`;
             } else if (event.type === 'network') {
                 details = `${event.protocol} ${event.direction} ${event.src_ip}:${event.src_port} -> ${event.dst_ip}:${event.dst_port} (${formatSize(event.packet_size)})`;
+            } else if (event.type === 'alert') {
+                details = `[${escapeHtml(event.severity)}] ${escapeHtml(event.rule_id)}: ${escapeHtml(event.message)}`;
             }
             
             row.innerHTML = `
@@ -376,6 +385,62 @@
             
             tbody.insertBefore(row, tbody.firstChild);
             while (tbody.children.length > 500) tbody.removeChild(tbody.lastChild);
+        }
+
+        function renderAlertEvent(event) {
+            const tbody = document.getElementById('alertBody');
+            const emptyState = document.getElementById('alertEmptyState');
+
+            emptyState.style.display = 'none';
+
+            const row = document.createElement('tr');
+            const time = new Date(event.timestamp).toLocaleTimeString('zh-CN');
+            const severity = event.severity || 'info';
+
+            row.innerHTML = `
+                <td><span class="badge badge-${escapeHtml(severity)}">${escapeHtml(severity)}</span></td>
+                <td class="time">${time}</td>
+                <td><span class="badge badge-alert">${escapeHtml(event.rule_id || 'alert')}</span></td>
+                <td>${escapeHtml(event.source_type || '-')}</td>
+                <td>${escapeHtml(event.message || '')}</td>
+            `;
+
+            tbody.insertBefore(row, tbody.firstChild);
+            while (tbody.children.length > 500) tbody.removeChild(tbody.lastChild);
+        }
+
+        function loadAlertHistory() {
+            fetch('/api/alerts')
+                .then(res => {
+                    if (!res.ok) {
+                        throw new Error('HTTP ' + res.status);
+                    }
+                    return res.json();
+                })
+                .then(data => {
+                    const tbody = document.getElementById('alertBody');
+                    if (!Array.isArray(data) || data.length === 0) {
+                        return;
+                    }
+
+                    tbody.innerHTML = '';
+                    alertEvents = [];
+                    data.slice().reverse().forEach(item => {
+                        const event = {
+                            type: 'alert',
+                            timestamp: item.created_at ? new Date(item.created_at).getTime() : Date.now(),
+                            rule_id: item.rule_id,
+                            severity: item.severity,
+                            source_type: item.source_type,
+                            message: item.message,
+                            details: item.details
+                        };
+                        alertEvents.unshift(event);
+                        renderAlertEvent(event);
+                    });
+                    updateStats();
+                })
+                .catch(err => console.error('Failed to load alert history:', err));
         }
         
         // ========== 进程治理 ==========
@@ -754,6 +819,7 @@
             document.getElementById('totalEvents').textContent = allEvents.length;
             document.getElementById('execveEvents').textContent = execveEvents.length;
             document.getElementById('networkEvents').textContent = networkEvents.length;
+            document.getElementById('alertEvents').textContent = alertEvents.length;
             
             const uptime = Math.floor((Date.now() - startTime) / 1000);
             const minutes = Math.floor(uptime / 60).toString().padStart(2, '0');
@@ -782,14 +848,17 @@
             allEvents = [];
             execveEvents = [];
             networkEvents = [];
+            alertEvents = [];
             
             document.getElementById('allEventsBody').innerHTML = '';
             document.getElementById('execveBody').innerHTML = '';
             document.getElementById('networkBody').innerHTML = '';
+            document.getElementById('alertBody').innerHTML = '';
             
             document.getElementById('allEmptyState').style.display = 'block';
             document.getElementById('execveEmptyState').style.display = 'block';
             document.getElementById('networkEmptyState').style.display = 'block';
+            document.getElementById('alertEmptyState').style.display = 'block';
             
             updateStats();
         }

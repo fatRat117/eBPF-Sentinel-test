@@ -29,6 +29,15 @@ func setupRoutes(r *gin.Engine, hub *websocket.Hub) {
 		c.JSON(http.StatusOK, events)
 	})
 
+	r.GET("/api/alerts", func(c *gin.Context) {
+		events, err := models.GetRecentAlertEvents(100)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, events)
+	})
+
 	r.GET("/api/policy/status", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"execve_enabled":  isExecveMonitoringEnabled(),

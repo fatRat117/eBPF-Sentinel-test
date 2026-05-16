@@ -20,20 +20,22 @@ func main() {
 	hub := websocket.NewHub()
 	go hub.Run()
 
-	eventChan := make(chan *plugin.Event, 256)
-	go dispatchPluginEvents(hub, eventChan)
-
 	manager := plugin.NewManager()
+	eventChan := make(chan *plugin.Event, 256)
+	go dispatchPluginEvents(hub, manager, eventChan)
+
 	execvePlugin := plugin.NewExecvePlugin(execveBPFProvider{})
 	networkPlugin := plugin.NewNetworkPlugin(networkBPFProvider{})
 	cpuPlugin := plugin.NewCPUPlugin(cpuBPFProvider{})
 	systemPlugin := plugin.NewSystemMonitorPlugin(cpuPlugin.GetCPUUsage)
+	alertPlugin := plugin.NewAlertPlugin()
 
 	setPolicyControls(execvePlugin, networkPlugin)
 	registerPlugin(manager, execvePlugin)
 	registerPlugin(manager, networkPlugin)
 	registerPlugin(manager, cpuPlugin)
 	registerPlugin(manager, systemPlugin)
+	registerPlugin(manager, alertPlugin)
 
 	if err := manager.LoadAll(); err != nil {
 		log.Printf("failed to load plugins: %v", err)
@@ -79,7 +81,7 @@ func (cpuBPFProvider) LoadAndAssign(obj interface{}, opts *ebpf.CollectionOption
 	return loadCpuObjects(obj, opts)
 }
 
-func dispatchPluginEvents(hub *websocket.Hub, eventChan <-chan *plugin.Event) {
+func dispatchPluginEvents(hub *websocket.Hub, manager *plugin.Manager, eventChan <-chan *plugin.Event) {
 	for event := range eventChan {
 		// Defense-in-depth: respect policy toggles even if upstream filtering misses.
 		switch event.Type {
@@ -94,12 +96,29 @@ func dispatchPluginEvents(hub *websocket.Hub, eventChan <-chan *plugin.Event) {
 		}
 
 		persistEvent(event)
-		hub.Broadcast(map[string]interface{}{
-			"type":      event.Type,
-			"timestamp": event.Timestamp,
-			"data":      event.Data,
-		})
+		broadcastPluginEvent(hub, event)
+
+		if event.Type == "alert" || manager == nil {
+			continue
+		}
+		for _, observer := range manager.Observers() {
+			for _, alert := range observer.HandleEvent(event) {
+				if alert == nil {
+					continue
+				}
+				persistEvent(alert)
+				broadcastPluginEvent(hub, alert)
+			}
+		}
 	}
+}
+
+func broadcastPluginEvent(hub *websocket.Hub, event *plugin.Event) {
+	hub.Broadcast(map[string]interface{}{
+		"type":      event.Type,
+		"timestamp": event.Timestamp,
+		"data":      event.Data,
+	})
 }
 
 func persistEvent(event *plugin.Event) {
@@ -147,6 +166,24 @@ func persistEvent(event *plugin.Event) {
 			Comm:       comm,
 		}); err != nil {
 			log.Printf("[network] failed to save event: %v", err)
+		}
+	case "alert":
+		ruleID, ruleOK := event.Data["rule_id"].(string)
+		severity, severityOK := event.Data["severity"].(string)
+		sourceType, sourceTypeOK := event.Data["source_type"].(string)
+		message, messageOK := event.Data["message"].(string)
+		if !ruleOK || !severityOK || !sourceTypeOK || !messageOK {
+			log.Printf("[alert] skipped invalid event payload: %#v", event.Data)
+			return
+		}
+		if err := models.CreateAlertEvent(&models.AlertEvent{
+			RuleID:     ruleID,
+			Severity:   severity,
+			SourceType: sourceType,
+			Message:    message,
+			Details:    models.MarshalAlertDetails(event.Data["details"]),
+		}); err != nil {
+			log.Printf("[alert] failed to save event: %v", err)
 		}
 	}
 }
