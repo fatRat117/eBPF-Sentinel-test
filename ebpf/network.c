@@ -11,7 +11,7 @@
 #define IP_PROTO_ICMP 1      // ICMP协议号
 
 // 采样配置 - 每N个包采样1个
-// 设置为100表示每100个包采样1个，既能减少事件量又能保证检测到流量
+// 设置为100表示普通流量每100个包采样1个；可疑端口会绕过采样直接上报。
 #define SAMPLE_RATE 100
 
 // 网络事件结构体 - 用于向用户态传递网络数据包信息
@@ -192,6 +192,19 @@ static __always_inline bool should_sample(u32 direction) {
     return (new_val % SAMPLE_RATE) == 0;
 }
 
+static __always_inline bool is_suspicious_port(u16 port) {
+    return port == 22 ||
+           port == 23 ||
+           port == 3389 ||
+           port == 4444 ||
+           port == 5555 ||
+           port == 31337;
+}
+
+static __always_inline bool has_suspicious_port(u16 src_port, u16 dst_port) {
+    return is_suspicious_port(src_port) || is_suspicious_port(dst_port);
+}
+
 /**
  * @brief 检查IP地址是否在白名单中
  * @param ip IP地址（主机字节序）
@@ -268,11 +281,6 @@ static __always_inline int process_packet(struct __sk_buff *skb, u8 direction) {
     if (protocol != IP_PROTO_TCP && protocol != IP_PROTO_UDP && protocol != IP_PROTO_ICMP)
         return 0;
     
-    // 采样检查 - 只处理每N个包中的1个
-    if (!should_sample(direction)) {
-        return 0;
-    }
-    
     // 获取IP地址
     u32 src_ip = get_src_ip(ip_data, data_end);
     u32 dst_ip = get_dst_ip(ip_data, data_end);
@@ -293,6 +301,11 @@ static __always_inline int process_packet(struct __sk_buff *skb, u8 direction) {
     
     // 端口白名单检查
     if (!is_port_whitelisted(src_port) || !is_port_whitelisted(dst_port)) {
+        return 0;
+    }
+
+    // 普通流量采样上报；可疑端口绕过采样，保证短连接和监听端口回包也能触发关联告警。
+    if (!has_suspicious_port(src_port, dst_port) && !should_sample(direction)) {
         return 0;
     }
     

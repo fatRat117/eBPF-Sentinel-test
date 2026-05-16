@@ -8,6 +8,7 @@
         let startTime = Date.now();
         let eventCountLastSecond = 0;
         let lastRateUpdate = Date.now();
+        let alertHistoryLoaded = false;
         
         // 策略状态（客户端缓存，避免突显已停用的事件）
         let policyState = {
@@ -18,12 +19,14 @@
         // 系统指标
         let systemStats = {
             cpuUsage: 0,
+            memoryUsage: 0,
             netSpeedIn: 0,
             netSpeedOut: 0
         };
 
         const networkSpeedHistoryLimit = 60;
         let networkSpeedHistory = [];
+        let networkSearchQuery = '';
         
         // ========== WebSocket连接 ==========
         function connect() {
@@ -38,7 +41,11 @@
                 console.log('WebSocket connected');
                 updateConnectionStatus('connected', '已连接');
                 loadPolicyStatus();
-                loadAlertHistory();
+                loadAlertConfig();
+                if (!alertHistoryLoaded) {
+                    loadAlertHistory();
+                    alertHistoryLoaded = true;
+                }
             };
             
             ws.onmessage = (event) => {
@@ -83,7 +90,6 @@
             document.getElementById('execve-events').classList.toggle('hidden', tab !== 'execve');
             document.getElementById('network-events').classList.toggle('hidden', tab !== 'network');
             document.getElementById('alert-events').classList.toggle('hidden', tab !== 'alert');
-            document.getElementById('policy-panel').classList.toggle('hidden', tab !== 'policy');
 
             if (tab === 'execve') {
                 startProcessPolling();
@@ -97,7 +103,7 @@
         }
         
         function getTabIndex(tab) {
-            const tabs = ['all', 'execve', 'network', 'alert', 'policy'];
+            const tabs = ['all', 'execve', 'network', 'alert'];
             return tabs.indexOf(tab) + 1;
         }
         
@@ -131,7 +137,7 @@
             } else if (data.type === 'network') {
                 networkEvents.unshift(event);
                 if (networkEvents.length > 500) networkEvents = networkEvents.slice(0, 500);
-                renderNetworkEvent(event);
+                renderNetworkEvents();
             } else if (data.type === 'alert') {
                 alertEvents.unshift(event);
                 if (alertEvents.length > 500) alertEvents = alertEvents.slice(0, 500);
@@ -149,6 +155,11 @@
             if (data.cpu_usage !== undefined) {
                 systemStats.cpuUsage = parseFloat(data.cpu_usage);
                 document.getElementById('cpuUsage').textContent = systemStats.cpuUsage.toFixed(1) + '%';
+            }
+
+            if (data.memory_usage !== undefined) {
+                systemStats.memoryUsage = parseFloat(data.memory_usage);
+                document.getElementById('memoryUsage').textContent = systemStats.memoryUsage.toFixed(1) + '%';
             }
             
             // 更新下载速度
@@ -360,12 +371,63 @@
             while (tbody.children.length > 500) tbody.removeChild(tbody.lastChild);
         }
         
-        function renderNetworkEvent(event) {
+        function filterNetworkEvents(query) {
+            networkSearchQuery = query.trim().toLowerCase();
+            renderNetworkEvents();
+        }
+
+        function renderNetworkEvents() {
             const tbody = document.getElementById('networkBody');
             const emptyState = document.getElementById('networkEmptyState');
-            
+            const countEl = document.getElementById('networkFilterCount');
+            const events = filteredNetworkEvents();
+
+            tbody.innerHTML = '';
+            countEl.textContent = events.length + ' / ' + networkEvents.length + ' events';
+
+            if (events.length === 0) {
+                emptyState.style.display = 'block';
+                emptyState.innerHTML = networkSearchQuery
+                    ? '<div class="empty-state-icon">🔍</div><p>未找到匹配的网络事件</p>'
+                    : '<div class="empty-state-icon">🌐</div><p>等待网络事件...</p>';
+                return;
+            }
+
             emptyState.style.display = 'none';
-            
+            const fragment = document.createDocumentFragment();
+            events.slice(0, 500).forEach(event => {
+                fragment.appendChild(createNetworkEventRow(event));
+            });
+            tbody.appendChild(fragment);
+        }
+
+        function filteredNetworkEvents() {
+            if (!networkSearchQuery) {
+                return networkEvents;
+            }
+            return networkEvents.filter(event => networkEventSearchText(event).includes(networkSearchQuery));
+        }
+
+        function networkEventSearchText(event) {
+            return [
+                event.type,
+                event.pid,
+                event.protocol,
+                event.protocol_id,
+                event.direction,
+                event.direction_id,
+                event.src_ip,
+                event.src_port,
+                event.dst_ip,
+                event.dst_port,
+                event.packet_size,
+                event.comm
+            ].filter(value => value !== undefined && value !== null)
+             .join(' ')
+             .toLowerCase();
+        }
+
+        function createNetworkEventRow(event) {
             const row = document.createElement('tr');
             const time = new Date(event.timestamp).toLocaleTimeString('zh-CN');
             const protocolClass = `badge-${event.protocol.toLowerCase()}`;
@@ -382,9 +444,7 @@
                 <td class="packet-size">${formatSize(event.packet_size)}</td>
                 <td class="comm">${escapeHtml(event.comm)}</td>
             `;
-            
-            tbody.insertBefore(row, tbody.firstChild);
-            while (tbody.children.length > 500) tbody.removeChild(tbody.lastChild);
+            return row;
         }
 
         function renderAlertEvent(event) {
@@ -396,13 +456,24 @@
             const row = document.createElement('tr');
             const time = new Date(event.timestamp).toLocaleTimeString('zh-CN');
             const severity = event.severity || 'info';
+            const pid = extractAlertPid(event);
+            const status = normalizeAlertStatus(event.status);
+            const alertId = Number(event.id || 0);
+            const action = pid && status === 'active'
+                ? `<button class="btn btn-danger btn-small" onclick="killProcess(${pid}, 'PID ${pid}', ${alertId || 'null'})">终止进程</button>`
+                : '<span class="time">-</span>';
 
+            if (alertId) {
+                row.dataset.alertId = String(alertId);
+            }
             row.innerHTML = `
                 <td><span class="badge badge-${escapeHtml(severity)}">${escapeHtml(severity)}</span></td>
                 <td class="time">${time}</td>
                 <td><span class="badge badge-alert">${escapeHtml(event.rule_id || 'alert')}</span></td>
                 <td>${escapeHtml(event.source_type || '-')}</td>
                 <td>${escapeHtml(event.message || '')}</td>
+                <td class="alert-status-cell">${renderAlertStatus(status)}</td>
+                <td>${action}</td>
             `;
 
             tbody.insertBefore(row, tbody.firstChild);
@@ -433,7 +504,9 @@
                             severity: item.severity,
                             source_type: item.source_type,
                             message: item.message,
-                            details: item.details
+                            details: parseAlertDetails(item.details),
+                            id: item.id,
+                            status: item.status || 'active'
                         };
                         alertEvents.unshift(event);
                         renderAlertEvent(event);
@@ -442,9 +515,42 @@
                 })
                 .catch(err => console.error('Failed to load alert history:', err));
         }
+
+        function parseAlertDetails(details) {
+            if (!details) return {};
+            if (typeof details === 'object') return details;
+            try {
+                return JSON.parse(details);
+            } catch (e) {
+                return {};
+            }
+        }
+
+        function extractAlertPid(event) {
+            const details = parseAlertDetails(event.details);
+            const pid = Number(details.pid || event.pid);
+            return Number.isInteger(pid) && pid > 0 ? pid : null;
+        }
+
+        function normalizeAlertStatus(status) {
+            return status || 'active';
+        }
+
+        function renderAlertStatus(status) {
+            const labels = {
+                active: '未处理',
+                terminated: '已终止',
+                exited: '已退出',
+                failed: '处理失败',
+                resolved: '已处理',
+                ignored: '已忽略'
+            };
+            const safeStatus = normalizeAlertStatus(status);
+            return `<span class="alert-status alert-status-${escapeHtml(safeStatus)}">${escapeHtml(labels[safeStatus] || safeStatus)}</span>`;
+        }
         
         // ========== 进程治理 ==========
-        function killProcess(pid, comm) {
+        function killProcess(pid, comm, alertId = null) {
             if (!policyState.execveEnabled) {
                 alert('进程管理已被策略禁用');
                 return;
@@ -455,14 +561,67 @@
                     .then(res => res.json())
                     .then(data => {
                         if (data.error) {
+                            if (data.code === 'process_not_found') {
+                                markAlertStatus(alertId, 'exited');
+                                loadProcesses();
+                                alert(data.message || '进程已退出');
+                                return;
+                            }
                             throw new Error(data.error);
                         }
+                        markAlertStatus(alertId, 'terminated');
+                        loadProcesses();
                         alert(data.message || '操作成功');
                     })
                     .catch(err => {
+                        if (alertId) {
+                            markAlertStatus(alertId, 'failed');
+                        }
                         alert('操作失败: ' + err.message);
                     });
             });
+        }
+
+        function markAlertStatus(alertId, status) {
+            if (!alertId) return;
+
+            updateAlertStatusInView(alertId, status);
+            fetch(`/api/alerts/${alertId}/status`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status })
+            })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.error) {
+                        throw new Error(data.error);
+                    }
+                    updateAlertStatusInView(alertId, data.status || status);
+                })
+                .catch(err => console.error('Failed to update alert status:', err));
+        }
+
+        function updateAlertStatusInView(alertId, status) {
+            alertEvents = alertEvents.map(event => {
+                if (Number(event.id) === Number(alertId)) {
+                    return { ...event, status };
+                }
+                return event;
+            });
+
+            const row = document.querySelector(`tr[data-alert-id="${alertId}"]`);
+            if (!row) return;
+
+            const statusCell = row.querySelector('.alert-status-cell');
+            if (statusCell) {
+                statusCell.innerHTML = renderAlertStatus(status);
+            }
+            if (status !== 'active') {
+                const button = row.querySelector('button');
+                if (button) {
+                    button.remove();
+                }
+            }
         }
         
         function forceKillProcess(pid, comm) {
@@ -478,6 +637,7 @@
                         if (data.error) {
                             throw new Error(data.error);
                         }
+                        loadProcesses();
                         alert(data.message || '操作成功');
                     })
                     .catch(err => {
@@ -752,6 +912,73 @@
                 })
                 .catch(err => console.error('Failed to load policy status:', err));
         }
+
+        function loadAlertConfig() {
+            fetch('/api/alert/config')
+                .then(res => res.json())
+                .then(data => {
+                    if (data.error) {
+                        throw new Error(data.error);
+                    }
+                    document.getElementById('alertCpuThreshold').value = data.cpu_threshold;
+                    document.getElementById('alertMemoryThreshold').value = data.memory_threshold;
+                    document.getElementById('alertNetSpeedThreshold').value = data.net_speed_threshold_kb;
+                    document.getElementById('alertPacketSizeLimit').value = data.packet_size_limit;
+                    document.getElementById('alertCooldownSeconds').value = data.cooldown_seconds;
+                    document.getElementById('alertCorrelationWindowSeconds').value = data.correlation_window_seconds;
+                    document.getElementById('alertMaxTimeGapSeconds').value = data.max_time_gap_seconds;
+                    document.getElementById('alertExfilSizeThresholdBytes').value = data.exfil_size_threshold_bytes;
+                    document.getElementById('singleMetricAlertsEnabled').checked = Boolean(data.single_metric_alerts_enabled);
+                })
+                .catch(err => console.error('Failed to load alert config:', err));
+        }
+
+        function openSettingsModal() {
+            loadPolicyStatus();
+            loadAlertConfig();
+            document.getElementById('settingsModal').classList.add('active');
+        }
+
+        function closeSettingsModal() {
+            document.getElementById('settingsModal').classList.remove('active');
+        }
+
+        function saveAlertConfig(event) {
+            event.preventDefault();
+            const statusEl = document.getElementById('alertConfigStatus');
+            const payload = {
+                cpu_threshold: Number(document.getElementById('alertCpuThreshold').value),
+                memory_threshold: Number(document.getElementById('alertMemoryThreshold').value),
+                net_speed_threshold_kb: Number(document.getElementById('alertNetSpeedThreshold').value),
+                packet_size_limit: Number(document.getElementById('alertPacketSizeLimit').value),
+                cooldown_seconds: Number(document.getElementById('alertCooldownSeconds').value),
+                correlation_window_seconds: Number(document.getElementById('alertCorrelationWindowSeconds').value),
+                max_time_gap_seconds: Number(document.getElementById('alertMaxTimeGapSeconds').value),
+                exfil_size_threshold_bytes: Number(document.getElementById('alertExfilSizeThresholdBytes').value),
+                single_metric_alerts_enabled: document.getElementById('singleMetricAlertsEnabled').checked
+            };
+
+            statusEl.textContent = '保存中...';
+            fetch('/api/alert/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.error) {
+                        throw new Error(data.error);
+                    }
+                    statusEl.textContent = '已保存';
+                    setTimeout(() => {
+                        if (statusEl.textContent === '已保存') statusEl.textContent = '';
+                    }, 2000);
+                })
+                .catch(err => {
+                    statusEl.textContent = '保存失败';
+                    alert('操作失败: ' + err.message);
+                });
+        }
         
         function toggleExecve(enabled) {
             fetch(`/api/policy/execve/${enabled}`, { method: 'POST' })
@@ -861,6 +1088,7 @@
             document.getElementById('alertEmptyState').style.display = 'block';
             
             updateStats();
+            renderNetworkEvents();
         }
         
         function reconnect() {
@@ -892,6 +1120,12 @@
         document.getElementById('confirmModal').addEventListener('click', (e) => {
             if (e.target.id === 'confirmModal') {
                 closeModal();
+            }
+        });
+
+        document.getElementById('settingsModal').addEventListener('click', (e) => {
+            if (e.target.id === 'settingsModal') {
+                closeSettingsModal();
             }
         });
 

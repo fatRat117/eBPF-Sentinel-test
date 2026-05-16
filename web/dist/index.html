@@ -37,6 +37,10 @@
                 <div class="value" id="cpuUsage">0%</div>
             </div>
             <div class="stat-card system-metric">
+                <h3>内存使用率</h3>
+                <div class="value" id="memoryUsage">0%</div>
+            </div>
+            <div class="stat-card system-metric">
                 <h3>下载速度</h3>
                 <div class="value" id="netSpeedIn">0 KB/s</div>
             </div>
@@ -58,6 +62,7 @@
         <div class="controls">
             <button class="btn btn-primary" id="clearBtn" onclick="clearEvents()">清空事件</button>
             <button class="btn btn-danger" id="reconnectBtn" onclick="reconnect()">重新连接</button>
+            <button class="btn btn-secondary" id="settingsBtn" onclick="openSettingsModal()">设置</button>
             <div class="rate-indicator">
                 <span>事件速率:</span>
                 <div class="rate-bar">
@@ -73,7 +78,6 @@
             <div class="tab" onclick="switchTab('execve', this)">进程监控</div>
             <div class="tab" onclick="switchTab('network', this)">网络事件</div>
             <div class="tab" onclick="switchTab('alert', this)">告警中心</div>
-            <div class="tab" onclick="switchTab('policy', this)">策略配置</div>
         </div>
 
         <!-- 全部事件 -->
@@ -157,6 +161,10 @@
                     <canvas id="networkSpeedChart" width="1200" height="260"></canvas>
                 </div>
             </div>
+            <div class="network-filter">
+                <input type="text" id="networkSearch" placeholder="搜索网络事件：进程 / 协议 / 方向 / PID / 地址 / 端口" oninput="filterNetworkEvents(this.value)">
+                <span id="networkFilterCount">0 events</span>
+            </div>
             <div class="events-container">
                 <table id="networkTable">
                     <thead>
@@ -197,6 +205,8 @@
                             <th>规则</th>
                             <th>来源</th>
                             <th>消息</th>
+                            <th>状态</th>
+                            <th>操作</th>
                         </tr>
                     </thead>
                     <tbody id="alertBody">
@@ -209,11 +219,28 @@
             </div>
         </div>
 
-        <!-- 策略配置 -->
-        <div id="policy-panel" class="policy-panel hidden">
-            <h2>策略配置</h2>
-            
-            <!-- 监控开关 -->
+    </div>
+
+    <!-- 确认对话框 -->
+    <div id="confirmModal" class="modal">
+        <div class="modal-content">
+            <h3>确认操作</h3>
+            <p id="confirmMessage">确定要执行此操作吗？</p>
+            <div class="modal-actions">
+                <button class="btn" onclick="closeModal()">取消</button>
+                <button class="btn btn-danger" id="confirmBtn" onclick="">确认</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 设置面板 -->
+    <div id="settingsModal" class="modal">
+        <div class="modal-content settings-modal-content">
+            <div class="settings-header">
+                <h3>设置</h3>
+                <button class="btn btn-secondary btn-small" onclick="closeSettingsModal()">关闭</button>
+            </div>
+
             <div class="policy-section">
                 <h3>监控开关</h3>
                 <div class="policy-controls">
@@ -228,17 +255,52 @@
                         <span id="networkStatus" class="status-badge status-enabled">已启用</span>
                     </div>
                 </div>
-        </div>
-    </div>
+            </div>
 
-    <!-- 确认对话框 -->
-    <div id="confirmModal" class="modal">
-        <div class="modal-content">
-            <h3>确认操作</h3>
-            <p id="confirmMessage">确定要执行此操作吗？</p>
-            <div class="modal-actions">
-                <button class="btn" onclick="closeModal()">取消</button>
-                <button class="btn btn-danger" id="confirmBtn" onclick="">确认</button>
+            <div class="policy-section">
+                <h3>告警阈值</h3>
+                <form class="alert-config-grid" onsubmit="saveAlertConfig(event)">
+                    <label>
+                        <span>CPU使用率(%)</span>
+                        <input type="number" id="alertCpuThreshold" min="1" max="100" step="0.1" required>
+                    </label>
+                    <label>
+                        <span>内存使用率(%)</span>
+                        <input type="number" id="alertMemoryThreshold" min="1" max="100" step="0.1" required>
+                    </label>
+                    <label>
+                        <span>网络速度(KB/s)</span>
+                        <input type="number" id="alertNetSpeedThreshold" min="1" step="1" required>
+                    </label>
+                    <label>
+                        <span>单包大小(bytes)</span>
+                        <input type="number" id="alertPacketSizeLimit" min="1" step="1" required>
+                    </label>
+                    <label>
+                        <span>冷却时间(s)</span>
+                        <input type="number" id="alertCooldownSeconds" min="1" step="1" required>
+                    </label>
+                    <label>
+                        <span>关联窗口(s)</span>
+                        <input type="number" id="alertCorrelationWindowSeconds" min="1" step="1" required>
+                    </label>
+                    <label>
+                        <span>关联最大间隔(s)</span>
+                        <input type="number" id="alertMaxTimeGapSeconds" min="1" step="1" required>
+                    </label>
+                    <label>
+                        <span>外泄阈值(bytes)</span>
+                        <input type="number" id="alertExfilSizeThresholdBytes" min="1" step="1" required>
+                    </label>
+                    <div class="toggle-switch alert-config-toggle">
+                        <input type="checkbox" id="singleMetricAlertsEnabled">
+                        <label for="singleMetricAlertsEnabled">启用单指标告警</label>
+                    </div>
+                    <div class="alert-config-actions">
+                        <button type="submit" class="btn btn-primary">保存阈值</button>
+                        <span id="alertConfigStatus" class="config-status"></span>
+                    </div>
+                </form>
             </div>
         </div>
     </div>

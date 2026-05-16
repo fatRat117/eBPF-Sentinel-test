@@ -44,6 +44,7 @@ type AlertEvent struct {
 	SourceType string    `json:"source_type"`
 	Message    string    `json:"message"`
 	Details    string    `json:"details"`
+	Status     string    `json:"status" gorm:"default:active"`
 	CreatedAt  time.Time `json:"created_at"`
 }
 
@@ -73,7 +74,25 @@ func CreateAlertEvent(event *AlertEvent) error {
 	if DB == nil {
 		return errors.New("database is not initialized")
 	}
+	if event.Status == "" {
+		event.Status = "active"
+	}
 	return DB.Create(event).Error
+}
+
+func UpdateAlertEventStatus(id uint64, status string) (*AlertEvent, error) {
+	if DB == nil {
+		return nil, errors.New("database is not initialized")
+	}
+	var event AlertEvent
+	if err := DB.First(&event, id).Error; err != nil {
+		return nil, err
+	}
+	event.Status = status
+	if err := DB.Save(&event).Error; err != nil {
+		return nil, err
+	}
+	return &event, nil
 }
 
 func GetRecentAlertEvents(limit int) ([]AlertEvent, error) {
@@ -82,6 +101,19 @@ func GetRecentAlertEvents(limit int) ([]AlertEvent, error) {
 	}
 	var events []AlertEvent
 	result := DB.Order("created_at desc").Limit(limit).Find(&events)
+	return events, result.Error
+}
+
+func GetRecentAlertEventsSince(limit int, since time.Time) ([]AlertEvent, error) {
+	if DB == nil {
+		return nil, errors.New("database is not initialized")
+	}
+	var events []AlertEvent
+	query := DB.Order("created_at desc").Limit(limit)
+	if !since.IsZero() {
+		query = query.Where("created_at >= ?", since)
+	}
+	result := query.Find(&events)
 	return events, result.Error
 }
 

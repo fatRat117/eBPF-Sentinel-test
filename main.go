@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/ebpf-sentinel/internal/models"
@@ -11,6 +12,8 @@ import (
 )
 
 func main() {
+	startedAt := time.Now()
+
 	// 初始化数据库 / Initialize database.
 	if _, err := models.InitDB(); err != nil {
 		log.Fatalf("failed to init database: %v", err)
@@ -48,7 +51,7 @@ func main() {
 	log.Println("eBPF Sentinel started! Monitoring execve syscalls, network traffic, and system metrics...")
 
 	r := gin.Default()
-	setupRoutes(r, hub)
+	setupRoutes(r, hub, alertPlugin, startedAt)
 
 	log.Println("API server started on :8080")
 	log.Println("WebSocket endpoint: ws://localhost:8080/ws")
@@ -176,14 +179,19 @@ func persistEvent(event *plugin.Event) {
 			log.Printf("[alert] skipped invalid event payload: %#v", event.Data)
 			return
 		}
-		if err := models.CreateAlertEvent(&models.AlertEvent{
+		alert := &models.AlertEvent{
 			RuleID:     ruleID,
 			Severity:   severity,
 			SourceType: sourceType,
 			Message:    message,
 			Details:    models.MarshalAlertDetails(event.Data["details"]),
-		}); err != nil {
-			log.Printf("[alert] failed to save event: %v", err)
+			Status:     "active",
 		}
+		if err := models.CreateAlertEvent(alert); err != nil {
+			log.Printf("[alert] failed to save event: %v", err)
+			return
+		}
+		event.Data["id"] = alert.ID
+		event.Data["status"] = alert.Status
 	}
 }

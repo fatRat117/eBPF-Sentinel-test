@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"runtime"
 	"strconv"
@@ -178,6 +179,16 @@ func killProcess(c *gin.Context, signal syscall.Signal, signalName string, messa
 	}
 
 	if err := syscall.Kill(pid, signal); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error":   "process not found",
+				"code":    "process_not_found",
+				"pid":     pid,
+				"status":  "exited",
+				"message": "Process already exited",
+			})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
