@@ -25,6 +25,13 @@
 sudo ./eBPF-Sentinel
 ```
 
+**注意**：如果设置了 `SENTINEL_ADMIN_TOKEN` 环境变量，所有变更操作（POST/PATCH/DELETE）需要携带 Bearer token：
+```bash
+curl -H "Authorization: Bearer $SENTINEL_ADMIN_TOKEN" \
+     http://127.0.0.1:8080/api/policy/status
+```
+未设置 Token 时，仅 localhost 可以执行变更操作。
+
 确认策略开关开启：
 
 ```bash

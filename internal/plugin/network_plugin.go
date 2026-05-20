@@ -268,6 +268,46 @@ func (p *NetworkPlugin) RemovePortWhitelist(port uint16) error {
 	return p.deleteWhitelist(p.objs.PortWhitelist, p.objs.PortWhitelistEnabled, port)
 }
 
+func (p *NetworkPlugin) ReplaceIPWhitelist(ips []string) error {
+	if p.objs == nil || p.objs.IpWhitelist == nil || p.objs.IpWhitelistEnabled == nil {
+		return nil
+	}
+	if err := clearUint32Whitelist(p.objs.IpWhitelist); err != nil {
+		return err
+	}
+	var value uint8 = 1
+	for _, ip := range ips {
+		parsed := net.ParseIP(ip).To4()
+		if parsed == nil {
+			return fmt.Errorf("invalid IPv4 address %q", ip)
+		}
+		key := binary.BigEndian.Uint32(parsed)
+		if err := p.objs.IpWhitelist.Update(key, value, ebpf.UpdateAny); err != nil {
+			return err
+		}
+	}
+	return updateToggleMap(p.objs.IpWhitelistEnabled, len(ips) > 0)
+}
+
+func (p *NetworkPlugin) ReplacePortWhitelist(ports []uint16) error {
+	if p.objs == nil || p.objs.PortWhitelist == nil || p.objs.PortWhitelistEnabled == nil {
+		return nil
+	}
+	if err := clearUint16Whitelist(p.objs.PortWhitelist); err != nil {
+		return err
+	}
+	var value uint8 = 1
+	for _, port := range ports {
+		if port == 0 {
+			return fmt.Errorf("invalid port %d", port)
+		}
+		if err := p.objs.PortWhitelist.Update(port, value, ebpf.UpdateAny); err != nil {
+			return err
+		}
+	}
+	return updateToggleMap(p.objs.PortWhitelistEnabled, len(ports) > 0)
+}
+
 func (p *NetworkPlugin) syncMonitoringMap(enabled bool) error {
 	if p.objs == nil || p.objs.NetMonitoringEnabled == nil {
 		return nil
@@ -371,4 +411,42 @@ func updateToggleMap(target *ebpf.Map, enabled bool) error {
 		value = 1
 	}
 	return target.Update(key, value, ebpf.UpdateAny)
+}
+
+func clearUint32Whitelist(target *ebpf.Map) error {
+	var key uint32
+	var value uint8
+	var keys []uint32
+	iter := target.Iterate()
+	for iter.Next(&key, &value) {
+		keys = append(keys, key)
+	}
+	if err := iter.Err(); err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if err := target.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func clearUint16Whitelist(target *ebpf.Map) error {
+	var key uint16
+	var value uint8
+	var keys []uint16
+	iter := target.Iterate()
+	for iter.Next(&key, &value) {
+		keys = append(keys, key)
+	}
+	if err := iter.Err(); err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if err := target.Delete(key); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			return err
+		}
+	}
+	return nil
 }

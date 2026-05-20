@@ -10,6 +10,8 @@ doc/
 ├── 02-architecture-layers/   # 各个层级说明
 ├── 03-minimal-tutorial/      # 重点实现的最小模型
 ├── 04-qa/                    # Q&A 问答
+├── tutorial.md               # 从零构建完整项目教程
+├── critical-alert-test-guide.md  # 告警测试指南
 └── README.md                 # 本文档
 ```
 
@@ -80,6 +82,31 @@ doc/
 
 ---
 
+### 5. 从零构建完整项目教程
+**文件**: [tutorial.md](./tutorial.md)
+
+以教学为目的，从空文件夹开始逐步构建完整监控系统：
+- 从 eBPF C 代码到 Web 仪表盘的完整流程
+- 包含插件架构、告警系统、安全中间件等进阶话题
+- 每层技术选型的原因和设计决策
+
+适合：想要理解完整项目构建过程的开发者
+
+---
+
+### 6. 告警测试指南
+**文件**: [critical-alert-test-guide.md](./critical-alert-test-guide.md)
+
+指导如何触发和验证各种告警规则：
+- 反弹 Shell 告警测试（ncat 方式）
+- 进程链攻击告警测试
+- 数据外泄告警测试（单元测试方式）
+- 常见失败原因排查
+
+适合：想要验证告警系统功能的开发者
+
+---
+
 ## 推荐阅读顺序
 
 ### 路径一：快速了解项目
@@ -101,9 +128,8 @@ doc/
 
 ## 其他资源
 
-- [项目根目录 README](../README.md) - 项目总体介绍
-- [LEARNING.md](../LEARNING.md) - 学习指南和架构图
-- [源码注释](../main.go) - 详细的代码注释
+- [源码注释](../main.go) - 程序入口，包含完整的组件说明
+- [插件系统源码](../internal/plugin/plugin.go) - Plugin 接口和 Manager 实现
 
 ---
 

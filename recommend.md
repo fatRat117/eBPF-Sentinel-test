@@ -1,5 +1,9 @@
 # eBPF-Sentinel 插件化改造建议
 
+> **状态更新**: 本文档中的建议已全部实施完成。项目现已完全插件化：5 个插件（ExecvePlugin、NetworkPlugin、CPUPlugin、SystemMonitorPlugin、AlertPlugin）通过 Plugin Manager 统一管理，Plugin 接口 + EventObserver 接口已落地，白名单系统、告警系统、安全中间件均已实现。详细文档请参考 [doc/](./doc/) 目录。
+
+## 历史记录（原始建议）
+
 ## 当前状态判断
 
 项目已经具备插件化的雏形：

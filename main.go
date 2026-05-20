@@ -24,8 +24,9 @@ func main() {
 	go hub.Run()
 
 	manager := plugin.NewManager()
+	execPathPolicy := newExecPathWhitelistPolicy()
 	eventChan := make(chan *plugin.Event, 256)
-	go dispatchPluginEvents(hub, manager, eventChan)
+	go dispatchPluginEvents(hub, manager, execPathPolicy, eventChan)
 
 	execvePlugin := plugin.NewExecvePlugin(execveBPFProvider{})
 	networkPlugin := plugin.NewNetworkPlugin(networkBPFProvider{})
@@ -34,6 +35,9 @@ func main() {
 	alertPlugin := plugin.NewAlertPlugin()
 
 	setPolicyControls(execvePlugin, networkPlugin)
+	if err := loadPersistedRuntimeConfig(alertPlugin); err != nil {
+		log.Printf("failed to load persisted runtime config: %v", err)
+	}
 	registerPlugin(manager, execvePlugin)
 	registerPlugin(manager, networkPlugin)
 	registerPlugin(manager, cpuPlugin)
@@ -43,6 +47,9 @@ func main() {
 	if err := manager.LoadAll(); err != nil {
 		log.Printf("failed to load plugins: %v", err)
 	}
+	if err := syncWhitelistRules(networkPlugin, execPathPolicy); err != nil {
+		log.Printf("failed to sync whitelist rules: %v", err)
+	}
 	if err := manager.AttachAll(); err != nil {
 		log.Printf("failed to attach plugins: %v", err)
 	}
@@ -51,7 +58,7 @@ func main() {
 	log.Println("eBPF Sentinel started! Monitoring execve syscalls, network traffic, and system metrics...")
 
 	r := gin.Default()
-	setupRoutes(r, hub, alertPlugin, startedAt)
+	setupRoutes(r, hub, alertPlugin, networkPlugin, execPathPolicy, startedAt)
 
 	log.Println("API server started on :8080")
 	log.Println("WebSocket endpoint: ws://localhost:8080/ws")
@@ -84,7 +91,7 @@ func (cpuBPFProvider) LoadAndAssign(obj interface{}, opts *ebpf.CollectionOption
 	return loadCpuObjects(obj, opts)
 }
 
-func dispatchPluginEvents(hub *websocket.Hub, manager *plugin.Manager, eventChan <-chan *plugin.Event) {
+func dispatchPluginEvents(hub *websocket.Hub, manager *plugin.Manager, execPolicy *execPathWhitelistPolicy, eventChan <-chan *plugin.Event) {
 	for event := range eventChan {
 		// Defense-in-depth: respect policy toggles even if upstream filtering misses.
 		switch event.Type {
@@ -97,11 +104,12 @@ func dispatchPluginEvents(hub *websocket.Hub, manager *plugin.Manager, eventChan
 				continue
 			}
 		}
+		suppressDerivedAlerts := markExecveWhitelist(event, execPolicy)
 
 		persistEvent(event)
 		broadcastPluginEvent(hub, event)
 
-		if event.Type == "alert" || manager == nil {
+		if event.Type == "alert" || manager == nil || suppressDerivedAlerts {
 			continue
 		}
 		for _, observer := range manager.Observers() {
@@ -136,10 +144,11 @@ func persistEvent(event *plugin.Event) {
 			return
 		}
 		if err := models.CreateEvent(&models.ExecveEvent{
-			PID:   pid,
-			PPID:  ppid,
-			Comm:  comm,
-			Argv0: argv0,
+			PID:         pid,
+			PPID:        ppid,
+			Comm:        comm,
+			Argv0:       argv0,
+			Whitelisted: eventBool(event.Data["whitelisted"]),
 		}); err != nil {
 			log.Printf("[execve] failed to save event: %v", err)
 		}
@@ -193,5 +202,16 @@ func persistEvent(event *plugin.Event) {
 		}
 		event.Data["id"] = alert.ID
 		event.Data["status"] = alert.Status
+	}
+}
+
+func eventBool(value interface{}) bool {
+	switch v := value.(type) {
+	case bool:
+		return v
+	case string:
+		return v == "true" || v == "1"
+	default:
+		return false
 	}
 }

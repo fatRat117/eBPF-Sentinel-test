@@ -481,3 +481,5 @@ sudo go run .
 - 了解更多的 Map 类型
 - 探索 kprobe 和 uprobe
 - 学习 eBPF 验证器规则
+
+> **提示**: 本教程展示的是 eBPF 最基础的工作原理。实际的 eBPF-Sentinel 项目使用了更高级的插件架构（Plugin 接口、EventObserver 模式、Manager 生命周期管理），支持 5 个插件并行运行。如果你想了解完整的项目构建过程，请参考 [doc/tutorial.md](../tutorial.md)。

@@ -27,12 +27,13 @@
                                     ↑↓ 数据通道
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                           插件层 (Plugin Layer)                           │
-│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────┐   │
-│  │  Execve Plugin   │  │ Network Plugin   │  │  System Monitor      │   │
-│  │  (进程监控插件)   │  │ (网络监控插件)    │  │  Plugin (系统监控)    │   │
-│  │  - eBPF加载      │  │ - eBPF加载       │  │  - CPU采集           │   │
-│  │  - 事件读取      │  │ - 事件读取       │  │  - 网速采集          │   │
-│  └──────────────────┘  └──────────────────┘  └──────────────────────┘   │
+│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────┐  ┌──────────────────┐   │
+│  │  Execve Plugin   │  │ Network Plugin   │  │   CPU Plugin     │  │  System Monitor      │  │  Alert Plugin    │   │
+│  │  (进程监控插件)   │  │ (网络监控插件)    │  │  (CPU监控插件)   │  │  Plugin (系统监控)    │  │  (告警推导插件)   │   │
+│  │  - eBPF加载      │  │ - eBPF加载       │  │  - eBPF加载      │  │  - CPU采集           │  │  - EventObserver │   │
+│  │  - 事件读取      │  │ - 事件读取       │  │  - sched_switch  │  │  - 网速采集          │  │  - 关联规则      │   │
+│  │  - PolicyControl │  │ - PolicyControl  │  │  - 使用率计算    │  │  - 内存采集          │  │  - 冷却机制      │   │
+│  └──────────────────┘  └──────────────────┘  └──────────────────┘  └──────────────────────┘  └──────────────────┘   │
 │  ┌──────────────────────────────────────────────────────────────────┐   │
 │  │                    Plugin Manager (插件管理器)                    │   │
 │  │  - 插件注册  - 生命周期管理  - 统一事件通道                        │   │
@@ -109,12 +110,16 @@
 
 **功能**:
 - RESTful API 接口
-- 事件查询 (`/api/events`, `/api/network-events`)
-- 进程列表查询 (`/api/processes`)，带 2 秒缓存
-- 监控状态 (`/api/policy/status`)
-- 进程治理 (`/api/process/kill/*`)
+- 事件查询 (`/api/events`, `/api/network-events`, `/api/alerts`)
+- 告警管理 (`/api/alerts/:id/status`, `/api/alert/config`)
+- 进程列表查询 (`/api/processes`)，带 2 秒缓存，含 CPU/内存信息
+- 监控状态和策略控制 (`/api/policy/status`, `/api/policy/execve/:enabled`, `/api/policy/network/:enabled`)
+- 白名单 CRUD (`/api/whitelist`)
+- 进程治理 (`/api/process/kill/:pid`, `/api/process/kill/:pid/force`)
+- WebSocket 实时事件流 (`/ws`)
+- 静态文件服务 (`/assets`, `/`)
 
-**代码位置**: `main.go` 中的 `setupRoutes()`
+**代码位置**: `routes.go` 中的 `setupRoutes()`
 
 #### 2.2 WebSocket Hub
 
@@ -128,21 +133,65 @@
 #### 2.3 Policy Manager (策略管理器)
 
 **功能**:
-- 监控开关控制
-- 进程缓存管理
-- 动态策略更新
+- 监控开关控制（execve/network 独立开关）
+- 白名单策略管理（IP/端口/可执行路径）
+- 动态策略更新与持久化
+- 策略同步到 eBPF Maps（立即生效）
 
-**实现方式**: `main.go` 中的全局变量和函数
+**实现方式**: `policy.go` 和 `whitelist_policy.go` 中的策略函数
+- `isExecveMonitoringEnabled()` / `setExecveMonitoringEnabled()`: execve 开关
+- `isNetworkMonitoringEnabled()` / `setNetworkMonitoringEnabled()`: 网络开关
+- `syncWhitelistRules()`: 白名单同步到 eBPF Maps
+- 使用 `atomic.Bool` 作为 fallback，`PolicyControl` 接口与插件通信
 
 #### 2.4 Event Processor (事件处理器)
 
 **功能**:
-- 解析 eBPF 事件数据
-- 数据库存储
-- 策略过滤
+- 统一事件分发 (`dispatchPluginEvents()`)
+- 策略过滤（defense-in-depth：事件分发层二次检查开关）
+- 白名单标记（抑制已白名单进程的告警推导）
+- 数据库持久化（按事件类型落库）
 - WebSocket 广播
+- Observer 链：将事件分发给 EventObserver 插件生成衍生事件（告警）
 
-**代码位置**: `main.go` 中的事件读取 goroutine
+**代码位置**: `main.go` 中的 `dispatchPluginEvents()` 和 `persistEvent()`
+
+#### 2.5 Security Middleware (安全中间件)
+
+**功能**:
+- Token 认证中间件 (`requireMutationAccess()`)
+- 本地回环 (localhost) 请求直接放行
+- 远程请求需要 `SENTINEL_ADMIN_TOKEN` 环境变量配置
+- Token 比较使用 `crypto/subtle.ConstantTimeCompare` 防止时序攻击
+- 支持 `Authorization: Bearer <token>` 和 `X-Sentinel-Token: <token>` 两种头格式
+- 仅读端点 (如 GET /api/events) 无需认证
+
+**代码位置**: `security.go`
+
+**保护范围**: 所有 POST/PATCH/DELETE 端点
+- 策略控制: `/api/policy/execve/:enabled`, `/api/policy/network/:enabled`
+- 白名单管理: `/api/whitelist` (POST/PATCH/DELETE)
+- 进程管理: `/api/process/kill/:pid`, `/api/process/kill/:pid/force`
+- 告警状态: `/api/alerts/:id/status`
+- 告警配置: `/api/alert/config`
+
+#### 2.6 Config Store (配置持久化)
+
+**功能**:
+- 运行时配置持久化到 SQLite `user_configs` 表
+- 启动时加载: `loadPersistedRuntimeConfig()`
+- 告警配置持久化（CPU/内存/网速阈值、冷却时间、关联窗口）
+- 监控开关持久化（execve_enabled、network_enabled）
+- 变更时写回 + 失败回滚模式
+
+**代码位置**: `config_store.go`
+
+**持久化的配置项**:
+| 配置键 | 类型 | 说明 |
+|--------|------|------|
+| `alert_config` | JSON | 告警阈值等完整配置 |
+| `execve_enabled` | bool | execve 监控开关 |
+| `network_enabled` | bool | 网络监控开关 |
 
 ---
 
@@ -162,6 +211,18 @@ type Plugin interface {
     Close() error                          // 清理资源
     Start(eventChan chan<- *Event) error   // 开始采集
 }
+
+type EventObserver interface {
+    HandleEvent(event *Event) []*Event     // 观察事件，生成衍生事件
+}
+```
+
+**PolicyControl 接口**:
+```go
+type PolicyControl interface {
+    IsEnabled() bool           // 查询启用状态
+    SetEnabled(bool) error     // 设置启用状态（同步到 eBPF Maps）
+}
 ```
 
 **代码位置**: `internal/plugin/plugin.go`
@@ -172,13 +233,14 @@ type Plugin interface {
 
 **功能**:
 - 加载 execve eBPF 对象
-- 挂载到 tracepoint
-- 读取 Ring Buffer
-- 转换为通用事件
+- 挂载到 `sys_enter_execve` tracepoint
+- 读取 Ring Buffer，转换为通用事件
+- 实现 PolicyControl 接口（运行时开关）
 
 **特点**:
-- 基于 eBPF 的内核监控
+- 基于 eBPF 的内核级监控
 - 零开销（不使用时无性能损耗）
+- 通过 BPFProvider 接口注入加载函数
 
 #### 3.3 Network Plugin
 
@@ -186,36 +248,71 @@ type Plugin interface {
 
 **功能**:
 - 加载 network eBPF 对象
-- 挂载到 TC ingress/egress
+- 挂载到所有非 loopback 网卡的 TC ingress/egress
 - 读取网络事件
-- 支持多网卡
+- 管理 IP/端口白名单 eBPF Maps
+- 实现 PolicyControl 接口
+- 采样机制减少高流量场景事件量
 
 **特点**:
-- 基于 TC 的数据包捕获
-- 支持采样减少事件量
+- 基于 TCX (AttachTCX) 的数据包捕获
+- IP/端口白名单在内核空间过滤，零开销
+- 支持多网卡自动发现
 
-#### 3.4 System Monitor Plugin
+#### 3.4 CPU Plugin
+
+**职责**: 封装 CPU eBPF 程序
+
+**功能**:
+- 加载 cpu eBPF 对象
+- 挂载到 `sched_switch` tracepoint
+- 通过 PERCPU Map 统计各核心 busy/idle 时间
+- 计算总体 CPU 使用率
+- 提供 `GetCPUUsage()` 供 SystemMonitorPlugin 调用
+
+**特点**:
+- eBPF 内核态采集，高性能
+- PERCPU Map 实现无锁统计
+- 追踪每次进程切换的时间分配
+
+#### 3.5 System Monitor Plugin
 
 **职责**: 系统指标采集
 
 **功能**:
-- CPU 使用率采集（通过eBPF tracepoint sched_switch）
-- 网络速度计算（使用gopsutil库）
-- 定时发送事件
+- CPU 使用率采集（注入 eBPF CPU Plugin，gopsutil 回退）
+- 内存使用率采集（gopsutil VirtualMemory）
+- 网络速度计算（gopsutil IOCounters，所有网卡累计流量差值）
+- 每秒采集一次
 
 **特点**:
-- CPU监控使用eBPF内核态实现
-- 网络速度使用gopsutil用户态采集
-- 支持eBPF失败时回退到gopsutil方式
+- CPU 监控优先使用 eBPF，失败时自动回退到 gopsutil
+- 内存和网络速度使用 gopsutil 用户态采集
 
-#### 3.5 插件管理器
+#### 3.6 Alert Plugin
+
+**职责**: 安全与健康告警推导
+
+**功能**:
+- 实现 `EventObserver` 接口，观察所有插件事件
+- 单指标告警：高 CPU、高内存、高网速、敏感命令、可疑端口、大包
+- 关联规则：反弹 Shell、数据外泄、进程链攻击
+- 可配置阈值（通过 `/api/alert/config` API）
+- 冷却机制：每个规则键独立冷却（默认 30 秒）
+- 告警状态管理：active → resolved/terminated/exited/failed/ignored
+
+**代码位置**: `internal/plugin/alert_plugin.go` + `internal/plugin/correlation.go`
+
+#### 3.7 插件管理器
 
 **职责**: 统一管理所有插件
 
 **功能**:
-- 插件注册
-- 批量加载/挂载
-- 生命周期管理
+- 插件注册（Register）
+- 批量加载/挂载 (LoadAll / AttachAll)
+- 批量启动 (StartAll)，每个插件独立 goroutine
+- Observers()：获取所有 EventObserver 插件
+- 生命周期管理 (DetachAll / CloseAll)
 
 ---
 
@@ -246,8 +343,9 @@ type Plugin interface {
 - 自动生成加载函数
 
 **生成文件**:
-- `execve_x86_bpfel.go`
-- `network_bpfel_x86.go`
+- `execve_x86_bpfel.go` / `execve_x86_bpfel.o`
+- `network_x86_bpfel.go` / `network_x86_bpfel.o`
+- `cpu_bpfel.go` / `cpu_bpfel.o`
 
 ---
 
@@ -267,7 +365,7 @@ type Plugin interface {
 **Tracepoint 子系统**:
 - 内核预定义的跟踪点
 - 稳定的 ABI 接口
-- 用于系统调用跟踪
+- 用于系统调用跟踪 (`sys_enter_execve`) 和调度事件跟踪 (`sched_switch`)
 
 **TC (Traffic Control) 子系统**:
 - 网络流量控制

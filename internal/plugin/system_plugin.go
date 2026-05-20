@@ -7,12 +7,14 @@ import (
 	"time"
 
 	"github.com/shirou/gopsutil/v3/cpu"
+	"github.com/shirou/gopsutil/v3/mem"
 	"github.com/shirou/gopsutil/v3/net"
 )
 
 // SystemStats 系统统计信息
 type SystemStats struct {
 	CPUUsage    float64 `json:"cpu_usage"`     // CPU使用率（百分比）
+	MemoryUsage float64 `json:"memory_usage"`  // 内存使用率（百分比）
 	NetSpeedIn  float64 `json:"net_speed_in"`  // 入站网速（KB/s）
 	NetSpeedOut float64 `json:"net_speed_out"` // 出站网速（KB/s）
 }
@@ -123,12 +125,18 @@ func (p *SystemMonitorPlugin) collectStats() {
 	// 采集网络速度
 	speedIn, speedOut := p.calculateNetSpeed()
 
+	var memoryUsage float64
+	if vm, err := mem.VirtualMemory(); err == nil && vm != nil {
+		memoryUsage = vm.UsedPercent
+	}
+
 	// 创建事件
 	event := &Event{
 		Type:      "system",
 		Timestamp: time.Now().Unix(),
 		Data: map[string]interface{}{
 			"cpu_usage":     fmt.Sprintf("%.1f", cpuUsage),
+			"memory_usage":  fmt.Sprintf("%.1f", memoryUsage),
 			"net_speed_in":  fmt.Sprintf("%.1f", speedIn),
 			"net_speed_out": fmt.Sprintf("%.1f", speedOut),
 		},

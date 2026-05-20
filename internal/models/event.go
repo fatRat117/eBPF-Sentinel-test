@@ -12,12 +12,13 @@ import (
 // ExecveEvent 表示execve系统调用事件
 // 当进程执行新程序时触发，记录进程创建信息
 type ExecveEvent struct {
-	ID        uint64    `json:"id" gorm:"primaryKey"` // 数据库自增ID
-	PID       uint32    `json:"pid"`                  // 进程ID
-	PPID      uint32    `json:"ppid"`                 // 父进程ID
-	Comm      string    `json:"comm"`                 // 进程名（可执行文件名）
-	Argv0     string    `json:"argv0"`                // 执行的命令行参数
-	CreatedAt time.Time `json:"created_at"`           // 事件创建时间
+	ID          uint64    `json:"id" gorm:"primaryKey"` // 数据库自增ID
+	PID         uint32    `json:"pid"`                  // 进程ID
+	PPID        uint32    `json:"ppid"`                 // 父进程ID
+	Comm        string    `json:"comm"`                 // 进程名（可执行文件名）
+	Argv0       string    `json:"argv0"`                // 执行的命令行参数
+	Whitelisted bool      `json:"whitelisted"`          // 是否命中可执行路径白名单
+	CreatedAt   time.Time `json:"created_at"`           // 事件创建时间
 }
 
 // NetworkEvent 表示网络数据包事件
@@ -61,7 +62,7 @@ func InitDB() (*gorm.DB, error) {
 
 	// 自动迁移表结构
 	// 如果表不存在则创建，如果字段有变化则更新
-	err = db.AutoMigrate(&ExecveEvent{}, &NetworkEvent{}, &AlertEvent{})
+	err = db.AutoMigrate(&ExecveEvent{}, &NetworkEvent{}, &AlertEvent{}, &UserConfig{}, &WhitelistRule{})
 	if err != nil {
 		return nil, err
 	}

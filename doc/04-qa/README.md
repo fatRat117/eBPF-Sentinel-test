@@ -312,14 +312,27 @@ hub.Broadcast(map[string]interface{}{
 
 **提供的接口**:
 
-| 接口 | 方法 | 功能 |
-|------|------|------|
-| `/api/events` | GET | 获取进程事件 |
-| `/api/network-events` | GET | 获取网络事件 |
-| `/api/processes` | GET | 获取进程列表（带缓存） |
-| `/api/policy/status` | GET | 获取监控状态 |
-| `/api/process/kill/:pid` | POST | 终止进程 |
-| `/ws` | WebSocket | 实时事件流 |
+| 接口 | 方法 | 功能 | 认证 |
+|------|------|------|------|
+| `/api/events` | GET | 获取进程事件 | 无 |
+| `/api/network-events` | GET | 获取网络事件 | 无 |
+| `/api/alerts` | GET | 获取告警事件（支持 history 参数） | 无 |
+| `/api/alerts/:id/status` | PATCH | 更新告警状态 | Admin Token |
+| `/api/alert/config` | GET | 获取告警配置 | 无 |
+| `/api/alert/config` | POST | 更新告警配置 | Admin Token |
+| `/api/processes` | GET | 获取进程列表（含CPU/内存） | 无 |
+| `/api/policy/status` | GET | 获取监控状态 | 无 |
+| `/api/policy/execve/:enabled` | POST | 切换 execve 监控 | Admin Token |
+| `/api/policy/network/:enabled` | POST | 切换网络监控 | Admin Token |
+| `/api/whitelist` | GET | 查询白名单规则 | 无 |
+| `/api/whitelist` | POST | 创建白名单规则 | Admin Token |
+| `/api/whitelist/:id` | PATCH | 更新白名单规则 | Admin Token |
+| `/api/whitelist/:id` | DELETE | 删除白名单规则 | Admin Token |
+| `/api/process/kill/:pid` | POST | 终止进程 (SIGTERM) | Admin Token |
+| `/api/process/kill/:pid/force` | POST | 强制终止进程 (SIGKILL) | Admin Token |
+| `/ws` | WebSocket | 实时事件流 | 无 |
+| `/assets` | Static | 前端静态资源 | 无 |
+| `/` | Static | 前端 SPA 入口 | 无 |
 
 #### 6. 插件系统
 
@@ -327,16 +340,25 @@ hub.Broadcast(map[string]interface{}{
 ```go
 type Plugin interface {
     Name() string
+    Description() string
     Load() error
     Attach() error
+    Detach() error
+    Close() error
     Start(eventChan chan<- *Event) error
+}
+
+type EventObserver interface {
+    HandleEvent(event *Event) []*Event
 }
 ```
 
-**系统监控插件**:
-- 采集 CPU 使用率
-- 采集网络速度
-- 不依赖 eBPF
+**已注册的 5 个插件**:
+- **ExecvePlugin**: eBPF 进程执行监控（sys_enter_execve tracepoint）
+- **NetworkPlugin**: eBPF 网络流量监控（TC ingress/egress），含 IP/端口白名单
+- **CPUPlugin**: eBPF CPU 使用率监控（sched_switch tracepoint）
+- **SystemMonitorPlugin**: 系统指标采集（CPU 注入、内存 gopsutil、网速 gopsutil）
+- **AlertPlugin**: EventObserver，安全与健康告警推导
 
 #### 7. 用户态的优势
 
@@ -663,17 +685,18 @@ eBPF-Sentinel 监控三类系统活动：
 #### 3. 系统指标监控
 
 **监控内容**:
-- CPU 使用率（百分比）
+- CPU 使用率（百分比，eBPF sched_switch tracepoint + gopsutil 回退）
+- 内存使用率（百分比，gopsutil VirtualMemory）
 - 网络入站速度（KB/s）
 - 网络出站速度（KB/s）
 
-**说明**: CPU使用率通过eBPF tracepoint sched_switch采集，网络速度通过gopsutil库采集。
-**监控方式**: eBPF tracepoint sched_switch (CPU) 和 gopsutil 库（网络速度）
+**监控方式**: eBPF tracepoint sched_switch (CPU 优先) 或 gopsutil 库（CPU 回退/内存/网络速度）
 
 **用途**:
 - 系统负载监控
 - 资源使用趋势
 - 性能瓶颈分析
+- 异常资源消耗检测
 
 **示例事件**:
 ```json
@@ -681,8 +704,36 @@ eBPF-Sentinel 监控三类系统活动：
   "type": "system",
   "data": {
     "cpu_usage": "23.5",
+    "memory_usage": "67.2",
     "net_speed_in": "150.2",
     "net_speed_out": "45.8"
+  }
+}
+```
+
+#### 4. 安全告警监控
+
+**监控内容**:
+- 单指标告警：CPU/内存/网速超阈值、敏感命令执行（nc/ncat/nmap/tcpdump 等）、可疑端口连接（22/23/3389/4444/31337）、大包传输
+- 关联规则告警：反弹 Shell 检测（敏感命令 + 可疑端口）、数据外泄检测（敏感文件读取 + 出站流量）、进程链攻击检测（父子进程模式匹配）
+
+**用途**:
+- 实时安全威胁检测
+- 异常行为关联分析
+- 攻击链重建
+- 告警状态跟踪（active → resolved/terminated/exited/failed/ignored）
+
+**示例事件**:
+```json
+{
+  "type": "alert",
+  "data": {
+    "rule_id": "reverse_shell_detected",
+    "severity": "critical",
+    "source_type": "network",
+    "message": "疑似反弹 Shell：进程 ncat(PID=12345) 在执行后 0.5 秒使用了可疑端口 4444",
+    "details": { "pid": 12345, "comm": "ncat", "port": 4444 },
+    "status": "active"
   }
 }
 ```
@@ -712,7 +763,10 @@ T+10ms: curl 发送 HTTP 请求
 |---------|---------|--------|---------|
 | 进程监控 | eBPF/tracepoint | 实时 | 极低 |
 | 网络监控 | eBPF/TC | 实时 | 低（采样） |
-| 系统指标 | eBPF (CPU) + gopsutil (网络) | 1秒间隔 | 极低 |
+| CPU 监控 | eBPF/sched_switch | 实时 | 极低 |
+| 内存监控 | gopsutil | 1秒间隔 | 极低 |
+| 网速监控 | gopsutil | 1秒间隔 | 极低 |
+| 告警监控 | EventObserver | 实时 | 极低 |
 
 #### 6. 典型使用场景
 
@@ -1048,12 +1102,13 @@ eBPF-Sentinel 使用 SQLite 数据库实现数据持久化。
 **进程事件表 (execve_events)**:
 ```go
 type ExecveEvent struct {
-    ID        uint64    `gorm:"primaryKey"`  // 自增主键
-    PID       uint32    `json:"pid"`         // 进程ID
-    PPID      uint32    `json:"ppid"`        // 父进程ID
-    Comm      string    `json:"comm"`        // 进程名
-    Argv0     string    `json:"argv0"`       // 命令参数
-    CreatedAt time.Time `json:"created_at"`  // 创建时间
+    ID          uint64    `gorm:"primaryKey"`  // 自增主键
+    PID         uint32    `json:"pid"`         // 进程ID
+    PPID        uint32    `json:"ppid"`        // 父进程ID
+    Comm        string    `json:"comm"`        // 进程名
+    Argv0       string    `json:"argv0"`       // 命令参数
+    Whitelisted bool      `json:"whitelisted"` // 是否命中白名单
+    CreatedAt   time.Time `json:"created_at"`  // 创建时间
 }
 ```
 
@@ -1074,6 +1129,42 @@ type NetworkEvent struct {
 }
 ```
 
+**告警事件表 (alert_events)**:
+```go
+type AlertEvent struct {
+    ID         uint64    `gorm:"primaryKey"`
+    RuleID     string    `json:"rule_id"`      // 规则ID
+    Severity   string    `json:"severity"`     // 严重级别
+    SourceType string    `json:"source_type"`  // 来源事件类型
+    Message    string    `json:"message"`      // 告警消息
+    Details    string    `json:"details"`      // JSON详情
+    Status     string    `json:"status"`       // 状态 (active/resolved/terminated)
+    CreatedAt  time.Time `json:"created_at"`
+}
+```
+
+**用户配置表 (user_configs)**:
+```go
+type UserConfig struct {
+    Key       string    `gorm:"primaryKey;size:128"` // 配置键
+    Value     string    `gorm:"type:text"`            // 配置值
+    CreatedAt time.Time
+    UpdatedAt time.Time
+}
+```
+
+**白名单规则表 (whitelist_rules)**:
+```go
+type WhitelistRule struct {
+    ID        uint64    `gorm:"primaryKey"`
+    RuleType  string    `gorm:"column:type;size:32;uniqueIndex:idx_whitelist_type_value"`
+    Value     string    `gorm:"size:512;uniqueIndex:idx_whitelist_type_value"`
+    Enabled   bool      `gorm:"default:true"`
+    CreatedAt time.Time
+    UpdatedAt time.Time
+}
+```
+
 #### 3. 数据库初始化
 
 ```go
@@ -1086,7 +1177,8 @@ func InitDB() (*gorm.DB, error) {
 
     // 自动迁移表结构
     // 如果表不存在则创建，如果字段有变化则更新
-    err = db.AutoMigrate(&ExecveEvent{}, &NetworkEvent{})
+    // 当前管理 5 张表
+    err = db.AutoMigrate(&ExecveEvent{}, &NetworkEvent{}, &AlertEvent{}, &UserConfig{}, &WhitelistRule{})
     if err != nil {
         return nil, err
     }
@@ -1279,3 +1371,284 @@ SQLite 适合中小规模部署，生产环境大数据量可考虑：
 - MySQL
 - TimescaleDB (时序数据)
 - ClickHouse (分析型)
+
+---
+
+## Q8: 告警系统如何工作?
+
+### 答案
+
+告警系统基于 EventObserver 模式，AlertPlugin 观察所有插件事件，根据可配置的规则生成告警。
+
+#### 1. 架构
+
+```
+插件事件流 → Event Channel → dispatchPluginEvents()
+                                   ↓
+                              Observer 链 (AlertPlugin.HandleEvent)
+                                   ↓
+                            滑动窗口 (slidingWindow)
+                                   ↓
+                         ┌────────┴────────┐
+                         ↓                  ↓
+                   关联规则匹配         单指标规则检查
+                   (correlation.go)    (alert_plugin.go)
+                         ↓                  ↓
+                         └────────┬────────┘
+                                  ↓
+                            冷却检查 (cooldown)
+                                  ↓
+                            告警事件生成 → DB + WebSocket
+```
+
+#### 2. 告警类型
+
+**单指标告警** (每个事件独立判断):
+
+| 规则 ID | 触发条件 | 默认阈值 | 严重级别 |
+|---------|---------|---------|---------|
+| `high_cpu_usage` | CPU ≥ 阈值 | 85% | warning |
+| `high_memory_usage` | 内存 ≥ 阈值 | 90% | warning |
+| `high_download_speed` | 下载速度 ≥ 阈值 | 10240 KB/s | warning |
+| `high_upload_speed` | 上传速度 ≥ 阈值 | 10240 KB/s | warning |
+| `sensitive_command_exec` | 执行 nc/ncat/nmap/tcpdump 等 | - | medium |
+| `suspicious_network_port` | 连接 22/23/3389/4444/31337 | - | medium |
+| `large_network_packet` | 数据包 ≥ 阈值 | 1 MB | info |
+
+**关联规则告警** (多事件时间窗口关联):
+
+| 规则 ID | 检测逻辑 | 严重级别 |
+|---------|---------|---------|
+| `reverse_shell_detected` | 敏感命令 + 可疑端口 + 时间窗口内 | critical |
+| `data_exfil_detected` | 敏感路径读取 + 出站流量 | critical |
+| `process_chain_attack` | 父子进程链匹配攻击模式 (bash→python→sh 等) | critical |
+
+#### 3. 关联规则详解
+
+**反弹 Shell 检测 (reverseShellRule)**:
+- 触发条件：execve 事件（敏感命令如 nc/ncat/socat）+ network 事件（可疑端口如 4444/5555/31337）
+- 时间窗口：默认 30 秒
+- 识别的敏感命令：nc, ncat, netcat, socat, tcpdump, nmap, masscan, chmod, chattr
+
+**数据外泄检测 (dataExfilRule)**:
+- 触发条件：execve 事件（路径含 /etc/shadow, /etc/passwd 等敏感文件）+ 出站网络包 ≥ 阈值（默认 1MB）
+- 时间窗口：默认 30 秒
+- 敏感路径：/etc/shadow, /etc/passwd, /root/.ssh, /etc/ssl/private, ~/.aws/credentials
+
+**进程链攻击检测 (processChainRule)**:
+- 触发条件：父子进程链匹配已知攻击模式
+- 预定义模式：bash→python→sh, bash→python3→sh, java→bash→curl, php→sh→wget
+
+#### 4. 冷却机制
+
+- 每个告警独立冷却（按 rule_id + 关键标识 + PID 组合键）
+- 默认冷却时间：30 秒
+- 冷却期间相同规则/相同进程的重复告警被抑制
+- 可通过 `/api/alert/config` API 调整冷却时间
+
+#### 5. 告警状态生命周期
+
+```
+active → resolved/terminated/exited/failed/ignored
+```
+
+- 新告警默认状态为 `active`
+- 用户可通过 `PATCH /api/alerts/:id/status` 更新状态
+- 前端仅对 `active` 状态 + 含 PID 的告警显示"终止进程"按钮
+
+#### 6. 配置 API
+
+```
+GET  /api/alert/config    → 获取当前配置
+POST /api/alert/config    → 更新配置（需要 Admin Token）
+```
+
+配置项 (AlertConfig):
+```json
+{
+  "cpu_threshold": 85.0,
+  "memory_threshold": 90.0,
+  "net_speed_threshold_kb": 10240.0,
+  "packet_size_limit": 1048576,
+  "cooldown_seconds": 30,
+  "correlation_window_seconds": 60,
+  "max_time_gap_seconds": 60,
+  "exfil_size_threshold_bytes": 1048576,
+  "single_metric_alerts_enabled": false
+}
+```
+
+---
+
+## Q9: 白名单系统如何工作?
+
+### 答案
+
+白名单系统通过 REST API 管理，持久化到 SQLite，并同步到 eBPF Maps 和内存策略。
+
+#### 1. 三种白名单类型
+
+| 类型 | 存储位置 | 生效方式 | 用途 |
+|------|---------|---------|------|
+| IP 白名单 | eBPF Hash Map (ip_whitelist) | 内核空间过滤 | 信任特定 IP 的流量 |
+| 端口白名单 | eBPF Hash Map (port_whitelist) | 内核空间过滤 | 信任特定端口的流量 |
+| 可执行路径白名单 | 内存策略 (execPathWhitelistPolicy) | 用户态抑制告警推导 | 信任特定进程的执行 |
+
+#### 2. 路径匹配模式
+
+可执行路径白名单支持四种匹配模式：
+
+| 模式 | 示例 | 匹配 |
+|------|------|------|
+| 精确匹配 | `/usr/bin/chmod` | `/usr/bin/chmod` |
+| 基础名匹配 | `chmod` | `/usr/bin/chmod`, `/bin/chmod` |
+| 目录前缀 | `/usr/local/bin/` | `/usr/local/bin/tool` |
+| 通配符 | `/opt/trusted/*` | `/opt/trusted/agent` |
+
+#### 3. 同步机制
+
+- IP/端口白名单：创建/更新/删除规则后，立即同步到 eBPF Hash Maps（内核空间生效）
+- 可执行路径白名单：创建/更新/删除规则后，重新加载内存策略
+- 同步失败时自动回滚 DB 操作（consistent 模式）
+
+#### 4. REST API
+
+```
+GET    /api/whitelist?type=ip&enabled_only=true    → 查询
+POST   /api/whitelist                              → 创建
+PATCH  /api/whitelist/:id                          → 更新
+DELETE /api/whitelist/:id                          → 删除
+```
+
+---
+
+## Q10: 安全访问控制如何工作?
+
+### 答案
+
+安全中间件 (`requireMutationAccess()`) 保护所有变更操作端点。
+
+#### 1. 访问控制策略
+
+```
+请求 → requireMutationAccess() 中间件
+         ↓
+    ┌────────────────────┐
+    │ 来自 localhost?    │──是──→ 放行
+    └────────────────────┘
+         │否
+         ↓
+    ┌────────────────────┐
+    │ 携带有效 Token?    │──是──→ 放行
+    └────────────────────┘
+         │否
+         ↓
+    403 Forbidden
+```
+
+#### 2. Token 配置
+
+```bash
+# 启动时设置 Admin Token
+export SENTINEL_ADMIN_TOKEN="your-secret-token-here"
+sudo -E ./eBPF-Sentinel
+
+# 未设置 Token → 仅 localhost 可变更
+# 设置了 Token → localhost 免 Token，远程需携带 Token
+```
+
+#### 3. Token 携带方式
+
+```
+# 方式一：Authorization Bearer
+curl -H "Authorization: Bearer $SENTINEL_ADMIN_TOKEN" \
+     -X POST http://host:8080/api/policy/execve/true
+
+# 方式二：X-Sentinel-Token
+curl -H "X-Sentinel-Token: $SENTINEL_ADMIN_TOKEN" \
+     -X POST http://host:8080/api/policy/execve/true
+```
+
+#### 4. 安全特性
+
+- Token 比较使用 `crypto/subtle.ConstantTimeCompare`（防止时序攻击）
+- Token 长度必须完全匹配
+- 仅读接口（GET）始终无需认证
+
+---
+
+## Q11: 插件架构如何设计?
+
+### 答案
+
+插件系统采用接口驱动设计，通过 Manager 统一管理所有插件的生命周期。
+
+#### 1. 核心接口
+
+```go
+// Plugin 接口：每个监控插件必须实现
+type Plugin interface {
+    Name() string
+    Description() string
+    Load() error                              // 加载 eBPF 对象
+    Attach() error                            // 挂载到内核
+    Detach() error                            // 卸载
+    Close() error                             // 清理资源
+    Start(eventChan chan<- *Event) error      // 开始采集（阻塞，在 goroutine 中运行）
+}
+
+// EventObserver 接口：观察事件生成衍生事件的插件
+type EventObserver interface {
+    HandleEvent(event *Event) []*Event        // 返回 nil 或多个衍生事件
+}
+
+// PolicyControl 接口：插件启用/禁用控制
+type PolicyControl interface {
+    IsEnabled() bool
+    SetEnabled(bool) error
+}
+```
+
+#### 2. 插件生命周期
+
+```
+Register() → LoadAll() → AttachAll() → StartAll(goroutines) → [运行] → DetachAll() → CloseAll()
+```
+
+每个插件在 `StartAll()` 时获得独立 goroutine，通过共享 event channel 发送事件。
+
+#### 3. 事件分发流程
+
+```
+┌─────────────┐
+│ ExecvePlugin │──┐
+└─────────────┘  │
+┌─────────────┐  │    ┌──────────────────────┐    ┌──────────────┐
+│NetworkPlugin│──┼───→│   Event Channel      │───→│dispatchPlugin│
+└─────────────┘  │    │  (chan *Event, 256)  │    │    Events()  │
+┌─────────────┐  │    └──────────────────────┘    └──────┬───────┘
+│  CPUPlugin  │──┤                                        │
+└─────────────┘  │                     ┌──────────────────┼──────────────────┐
+┌─────────────┐  │                     ↓                  ↓                  ↓
+│SystemMonitor│──┘              persistEvent()   broadcastPluginEvent()  manager.Observers()
+└─────────────┘                      ↓                  ↓                  ↓
+                                  SQLite            WebSocket          AlertPlugin
+                                                                     (HandleEvent)
+```
+
+#### 4. 已注册的 5 个插件
+
+| 插件 | 数据源 | 事件类型 | 特殊接口 |
+|------|--------|---------|---------|
+| ExecvePlugin | eBPF sys_enter_execve | execve | PolicyControl |
+| NetworkPlugin | eBPF TC ingress/egress | network | PolicyControl + Whitelist |
+| CPUPlugin | eBPF sched_switch | (内部使用) | GetCPUUsage() |
+| SystemMonitorPlugin | eBPF CPU + gopsutil | system | (无) |
+| AlertPlugin | EventObserver 链 | alert | EventObserver |
+
+#### 5. 设计优势
+
+- **关注点分离**: 每个插件独立管理其 eBPF 程序和生命周期
+- **可扩展**: 添加新监控类型只需实现 Plugin 接口
+- **统一事件总线**: 所有事件通过单一 channel 流转，便于统一处理
+- **观察者模式**: EventObserver 接口允许插件推导衍生事件，无需修改原有插件

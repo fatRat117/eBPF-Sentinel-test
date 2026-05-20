@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -12,7 +13,7 @@ import (
 )
 
 // setupRoutes 配置Gin路由 / Configures API, WebSocket and static routes.
-func setupRoutes(r *gin.Engine, hub *websocket.Hub, alertPlugin *plugin.AlertPlugin, startedAt time.Time) {
+func setupRoutes(r *gin.Engine, hub *websocket.Hub, alertPlugin *plugin.AlertPlugin, networkPlugin *plugin.NetworkPlugin, execPolicy *execPathWhitelistPolicy, startedAt time.Time) {
 	r.GET("/api/events", func(c *gin.Context) {
 		events, err := models.GetRecentEvents(100)
 		if err != nil {
@@ -100,8 +101,12 @@ func setupRoutes(r *gin.Engine, hub *websocket.Hub, alertPlugin *plugin.AlertPlu
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid alert config"})
 			return
 		}
-		if err := alertPlugin.UpdateConfig(config); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		if err := updateAlertConfigConsistent(alertPlugin, config); err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, errInvalidAlertConfig) {
+				status = http.StatusBadRequest
+			}
+			c.JSON(status, gin.H{"error": err.Error()})
 			return
 		}
 		c.JSON(http.StatusOK, alertPlugin.Config())
@@ -113,7 +118,7 @@ func setupRoutes(r *gin.Engine, hub *websocket.Hub, alertPlugin *plugin.AlertPlu
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid enabled value"})
 			return
 		}
-		if err := setExecveMonitoringEnabled(enabled); err != nil {
+		if err := updateExecveMonitoringConsistent(enabled); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -126,13 +131,14 @@ func setupRoutes(r *gin.Engine, hub *websocket.Hub, alertPlugin *plugin.AlertPlu
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid enabled value"})
 			return
 		}
-		if err := setNetworkMonitoringEnabled(enabled); err != nil {
+		if err := updateNetworkMonitoringConsistent(enabled); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"network_enabled": enabled})
 	})
 
+	registerWhitelistRoutes(r, networkPlugin, execPolicy)
 	registerProcessRoutes(r)
 
 	r.GET("/ws", func(c *gin.Context) {

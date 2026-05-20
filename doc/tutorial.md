@@ -1048,8 +1048,17 @@ func getCPUUsage() float64 {
 
 ```
 ebpf-sentinel/
-├── main.go                          # 入口：加载所有 eBPF，启动服务
-├── go.mod                           # Go 模块定义
+├── main.go                          # 入口：Plugin Manager 统一管理
+├── policy.go                        # 监控开关策略
+├── routes.go                        # HTTP API 路由注册
+├── security.go                      # 安全中间件 (Admin Token)
+├── whitelist_policy.go              # 白名单策略管理
+├── whitelist_routes.go              # 白名单 REST API
+├── process_routes.go                # 进程列表查询 + 进程管理
+├── config_store.go                  # 运行时配置持久化
+├── ebpf_events.go                   # eBPF 事件结构体
+├── network_utils.go                 # 网络工具函数
+├── go.mod / go.sum                  # Go 模块定义
 ├── ebpf/
 │   ├── execve.c                     # 进程监控 eBPF
 │   ├── network.c                    # 网络监控 eBPF
@@ -1057,34 +1066,49 @@ ebpf-sentinel/
 │   └── vmlinux.h                    # 内核类型定义
 ├── internal/
 │   ├── models/
-│   │   └── event.go                 # GORM 模型 + 数据库操作
-│   ├── websocket/
-│   │   └── hub.go                   # WebSocket Hub
-│   └── plugin/
-│       └── plugin.go                # 插件接口
-└── web/dist/
-    └── index.html                   # 前端 Dashboard
+│   │   ├── event.go                 # ExecveEvent, NetworkEvent, AlertEvent + CRUD
+│   │   ├── config.go                # UserConfig, WhitelistRule + CRUD
+│   │   └── config_test.go           # 配置测试
+│   ├── plugin/
+│   │   ├── plugin.go                # Plugin + EventObserver 接口, Manager
+│   │   ├── execve_plugin.go         # Execve eBPF 插件
+│   │   ├── network_plugin.go        # Network eBPF 插件 (含白名单)
+│   │   ├── cpu_plugin.go            # CPU eBPF 插件 (sched_switch)
+│   │   ├── system_plugin.go         # 系统指标 (CPU/内存/网速)
+│   │   ├── alert_plugin.go          # 告警推导 (EventObserver)
+│   │   ├── correlation.go           # 关联规则引擎
+│   │   ├── types.go                 # 二进制事件结构体
+│   │   ├── bpf_providers.go         # BPF 加载接口
+│   │   └── alert_plugin_test.go     # 告警测试
+│   └── websocket/
+│       └── hub.go                   # WebSocket Hub
+├── web/dist/
+│   └── index.html                   # 前端仪表盘
+├── *_bpfel.go / *_bpfel.o          # bpf2go 生成文件
+└── sentinel.db                      # SQLite 数据库文件
 ```
 
 ### 10.2 main.go 主流程
 
 ```
 main()
-├── InitDB()              初始化 SQLite
-├── NewHub() / Run()      启动 WebSocket Hub
-├── remove memlock        解除内存限制
-├── loadExecveObjects()   加载 execve eBPF
-├── link.Tracepoint()     挂载 execve tracepoint
-├── ringbuf.NewReader()   打开 Ring Buffer
-├── 启动 goroutine        读取 execve 事件 → DB + WebSocket
-├── loadNetworkObjects()  加载 network eBPF
-├── AttachTCX()           挂载到所有网络接口
-├── 启动 goroutine        读取网络事件 → DB + WebSocket
-├── loadCpuObjects()      加载 CPU eBPF
-├── link.Tracepoint()     挂载 sched_switch
-├── gin.Default()         创建 HTTP 服务器
-├── setupRoutes()         注册路由
-└── r.Run(":8080")        启动服务
+├── models.InitDB()                初始化 SQLite (5 张表自动迁移)
+├── websocket.NewHub() / Run()    启动 WebSocket Hub
+├── plugin.NewManager()           创建 Plugin Manager
+├── 注册 5 个插件:
+│   ├── ExecvePlugin              (sys_enter_execve tracepoint)
+│   ├── NetworkPlugin             (TC ingress/egress 所有网卡)
+│   ├── CPUPlugin                 (sched_switch tracepoint)
+│   ├── SystemMonitorPlugin       (CPU注入 + gopsutil 内存/网速)
+│   └── AlertPlugin               (EventObserver 告警推导)
+├── loadPersistedRuntimeConfig()  从 DB 加载上次的配置
+├── manager.LoadAll()             加载所有 eBPF 对象
+├── syncWhitelistRules()          同步白名单到 eBPF Maps
+├── manager.AttachAll()           挂载所有 eBPF 程序
+├── manager.StartAll(eventChan)   启动所有插件 (各自 goroutine)
+├── gin.Default()                 创建 HTTP 服务器
+├── setupRoutes()                 注册全部路由
+└── r.Run(":8080")                启动服务
 ```
 
 ### 10.3 构建运行
@@ -1107,17 +1131,54 @@ sudo ./ebpf-sentinel
 
 ## 11. 进阶话题
 
-### 11.1 网络监控中的白名单机制
+### 11.0 插件架构设计
 
-**方案 A：Go 中过滤（简单但低效）**
+eBPF-Sentinel 使用插件系统管理所有监控模块。核心思想是：每个 eBPF 程序封装为一个插件，通过统一的 Plugin 接口管理生命周期。
+
+**Plugin 接口**：
 ```go
-if isInWhitelist(comm) { continue }
+type Plugin interface {
+    Name() string
+    Description() string
+    Load() error                              // 加载 eBPF 对象到内核
+    Attach() error                            // 挂载到跟踪点/TC 钩子
+    Detach() error                            // 卸载
+    Close() error                             // 释放资源
+    Start(eventChan chan<- *Event) error      // 开始采集 (阻塞，goroutine 中运行)
+}
 ```
-- 缺点：每个事件都要从内核传到用户态，浪费带宽
 
-**方案 B：eBPF Map 中过滤（高效）**
+**EventObserver 接口**（告警插件使用）：
+```go
+type EventObserver interface {
+    HandleEvent(event *Event) []*Event        // 观察事件，返回衍生事件
+}
+```
+
+**为什么用插件架构？**
+- **关注点分离**: 每个 eBPF 程序独立管理，互不影响
+- **可扩展**: 添加新监控类型只需实现 Plugin 接口
+- **统一管理**: Manager 批量控制所有插件的 Load/Attach/Start/Close
+- **观察者模式**: AlertPlugin 通过 EventObserver 接口观察所有事件，无需修改任何插件代码
+
+**事件分发流程**：
+```
+插件 goroutine → Event Channel → dispatchPluginEvents()
+    → persistEvent (DB) + broadcast (WS) + manager.Observers() (AlertPlugin)
+```
+
+### 11.1 白名单机制
+
+白名单通过 REST API 管理，持久化到 SQLite，同步到 eBPF Maps 和内存策略。
+
+**三种白名单类型**：
+- **IP 白名单**: 存储在 eBPF `ip_whitelist` Hash Map，在内核空间过滤网络包
+- **端口白名单**: 存储在 eBPF `port_whitelist` Hash Map，在内核空间过滤网络包
+- **可执行路径白名单**: 存储在内存策略，匹配的进程执行事件被标记为 `whitelisted=true`，抑制告警推导
+
+**IP/端口白名单（内核空间过滤，零开销）**：
 ```c
-// network.c 中的 IP/端口白名单
+// network.c 中的白名单 Map
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 256);
@@ -1127,13 +1188,26 @@ struct {
 
 // 在 eBPF 中检查
 if (!is_ip_whitelisted(src_ip)) {
-    return 0;  // 不在白名单中，跳过
+    return 0;  // 白名单外的 IP 直接跳过
 }
 ```
-- 优点：被过滤的事件根本不出内核，零开销
-- 更新白名单：`objs.IpWhitelist.Update(key, value, flags)`
 
-**注意**: execve.c 不再使用白名单过滤，所有进程事件都会被捕获。
+**可执行路径白名单（支持四种匹配模式）**：
+- 精确匹配: `/usr/bin/chmod` → `/usr/bin/chmod`
+- 基础名匹配: `chmod` → `/usr/bin/chmod`
+- 目录前缀: `/usr/local/bin/` → `/usr/local/bin/tool`
+- 通配符: `/opt/trusted/*` → `/opt/trusted/agent`
+
+**CRUD 操作带自动同步和回滚**：
+```go
+func createWhitelistRuleConsistent(networkPlugin, execPolicy, rule) error {
+    // 1. 写入数据库
+    models.CreateWhitelistRule(rule)
+    // 2. 同步到 eBPF Maps / 内存策略
+    syncWhitelistRules(networkPlugin, execPolicy)
+    // 3. 同步失败 → 回滚 DB
+}
+```
 
 ### 11.2 采样策略
 
@@ -1171,6 +1245,87 @@ if err := loadNetworkObjects(networkObjs, nil); err != nil {
 - **循环限制**：eBPF 传统上不允许无限循环（有界循环需要内核 5.3+）
 - **栈限制**：eBPF 程序栈空间只有 512 字节，大结构体要用 Map
 
+### 11.5 告警系统
+
+AlertPlugin 实现 EventObserver 接口，自动从事件流中推导安全告警。
+
+**告警分类**：
+
+**单指标告警**（每个事件独立判断）：
+- CPU 过高（默认 >85%）
+- 内存过高（默认 >90%）
+- 网络速度异常（默认 >10MB/s）
+- 敏感命令执行（nc, ncat, nmap, tcpdump, socat, chmod, chattr）
+- 可疑端口连接（22, 23, 3389, 4444, 5555, 31337）
+- 大包传输（默认 >1MB）
+
+**关联规则告警**（多事件时间窗口关联）：
+- **反弹 Shell 检测**: 敏感命令 + 可疑端口 + 30秒内
+- **数据外泄检测**: 读取 /etc/shadow 等敏感文件 + 出站流量
+- **进程链攻击**: 父子进程链匹配已知攻击模式（如 bash→python→sh）
+
+**冷却机制**：
+```go
+func (p *AlertPlugin) allow(ruleKey string) bool {
+    // 每个规则 + PID 独立冷却
+    if time.Since(lastAlert[ruleKey]) < p.cooldown {
+        return false  // 冷却中，抑制
+    }
+    lastAlert[ruleKey] = time.Now()
+    return true
+}
+```
+
+**配置 API**：
+```bash
+# 查看告警配置
+curl http://localhost:8080/api/alert/config
+
+# 更新告警配置（调整 CPU 阈值为 90%，冷却时间为 60 秒）
+curl -X POST http://localhost:8080/api/alert/config \
+  -H "Content-Type: application/json" \
+  -d '{"cpu_threshold": 90.0, "cooldown_seconds": 60}'
+```
+
+### 11.6 安全中间件
+
+生产环境应限制变更操作的访问权限。eBPF-Sentinel 通过 `requireMutationAccess()` 中间件实现。
+
+**工作原理**：
+```
+请求 → 是否 localhost？ → 是 → 放行
+         ↓ 否
+      携带有效 Token？ → 是 → 放行
+         ↓ 否
+      403 Forbidden
+```
+
+**配置 Admin Token**：
+```bash
+# 启动时设置
+export SENTINEL_ADMIN_TOKEN="your-secret-token"
+sudo -E ./ebpf-sentinel
+
+# 不设置 → 仅 localhost 可变更
+# 设置了 → localhost 免 Token，远程需携带
+```
+
+**携带 Token**：
+```bash
+# Bearer Token
+curl -H "Authorization: Bearer $SENTINEL_ADMIN_TOKEN" \
+     -X POST http://host:8080/api/policy/execve/true
+
+# X-Sentinel-Token
+curl -H "X-Sentinel-Token: $SENTINEL_ADMIN_TOKEN" \
+     -X POST http://host:8080/api/policy/execve/true
+```
+
+**安全特性**：
+- 使用 `crypto/subtle.ConstantTimeCompare` 防止时序攻击
+- GET 接口始终无需认证
+- Token 未设置时远程变更请求被拒绝
+
 ---
 
 ## 总结
@@ -1181,11 +1336,13 @@ if err := loadNetworkObjects(networkObjs, nil); err != nil {
 |------|------|------|
 | 内核 | eBPF C | 捕获系统事件（进程、网络、CPU） |
 | 加载 | cilium/ebpf + bpf2go | 编译、加载、管理 eBPF 程序 |
-| 处理 | Go | 读取 Ring Buffer、解析事件 |
-| 存储 | GORM + SQLite | 持久化事件数据 |
+| 插件 | Plugin Manager | 统一管理 5 个插件生命周期 |
+| 处理 | Go | 事件分发、告警推导、白名单同步 |
+| 安全 | Security Middleware | Token 认证、变更控制 |
+| 存储 | GORM + SQLite (5 张表) | 持久化事件、配置、白名单、告警 |
 | 实时 | Gorilla WebSocket | 推送事件到前端 |
-| API | Gin | 提供 REST 接口 |
-| 展示 | HTML/CSS/JS | 可视化 Dashboard |
+| API | Gin | 提供 REST 接口（17+ 端点） |
+| 展示 | HTML/CSS/JS | 可视化仪表盘 |
 
 每个层级都可以独立扩展：
 - 加新监控？写个新的 `.c` 文件 + Go 加载代码
