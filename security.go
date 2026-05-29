@@ -10,7 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const adminTokenEnv = "SENTINEL_ADMIN_TOKEN"
+const adminTokenEnv = "THIS_IS_MY_OWN_TOKEN"
 
 // requireMutationAccess keeps control-plane endpoints local by default.
 // Remote writes require an explicit bearer token configured at process start.

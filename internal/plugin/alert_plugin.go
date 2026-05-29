@@ -113,6 +113,7 @@ func (p *AlertPlugin) Config() AlertConfig {
 
 func (p *AlertPlugin) UpdateConfig(config AlertConfig) error {
 	config = p.fillConfigDefaults(config)
+	// 处理边界
 	if config.CPUThreshold <= 0 || config.CPUThreshold > 100 {
 		return fmt.Errorf("cpu_threshold must be between 0 and 100")
 	}
@@ -140,6 +141,7 @@ func (p *AlertPlugin) UpdateConfig(config AlertConfig) error {
 
 	p.mu.Lock()
 
+	// 更新阈值
 	p.cpuThreshold = config.CPUThreshold
 	p.memoryThreshold = config.MemoryThreshold
 	p.netSpeedThresholdKB = config.NetSpeedThresholdKB

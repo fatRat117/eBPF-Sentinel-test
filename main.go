@@ -14,7 +14,7 @@ import (
 func main() {
 	startedAt := time.Now()
 
-	// 初始化数据库 / Initialize database.
+	// 初始化数据库
 	if _, err := models.InitDB(); err != nil {
 		log.Fatalf("failed to init database: %v", err)
 	}
@@ -57,6 +57,7 @@ func main() {
 
 	log.Println("eBPF Sentinel started! Monitoring execve syscalls, network traffic, and system metrics...")
 
+	// 启动 HTTP + WebSocket 服务
 	r := gin.Default()
 	setupRoutes(r, hub, alertPlugin, networkPlugin, execPathPolicy, startedAt)
 
@@ -93,7 +94,7 @@ func (cpuBPFProvider) LoadAndAssign(obj interface{}, opts *ebpf.CollectionOption
 
 func dispatchPluginEvents(hub *websocket.Hub, manager *plugin.Manager, execPolicy *execPathWhitelistPolicy, eventChan <-chan *plugin.Event) {
 	for event := range eventChan {
-		// Defense-in-depth: respect policy toggles even if upstream filtering misses.
+		// 防御纵深: respect policy toggles even if upstream filtering misses.
 		switch event.Type {
 		case "execve":
 			if !isExecveMonitoringEnabled() {

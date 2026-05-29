@@ -16,6 +16,9 @@
             networkEnabled: true
         };
 
+        let networkWhitelistRules = [];
+        let adminToken = localStorage.getItem('sentinelAdminToken') || '';
+
         // 系统指标
         let systemStats = {
             cpuUsage: 0,
@@ -42,6 +45,7 @@
                 updateConnectionStatus('connected', '已连接');
                 loadPolicyStatus();
                 loadAlertConfig();
+                loadNetworkWhitelist();
                 if (!alertHistoryLoaded) {
                     loadAlertHistory();
                     alertHistoryLoaded = true;
@@ -387,9 +391,13 @@
 
             if (events.length === 0) {
                 emptyState.style.display = 'block';
-                emptyState.innerHTML = networkSearchQuery
-                    ? '<div class="empty-state-icon">🔍</div><p>未找到匹配的网络事件</p>'
-                    : '<div class="empty-state-icon">🌐</div><p>等待网络事件...</p>';
+                if (networkSearchQuery) {
+                    emptyState.innerHTML = '<div class="empty-state-icon">🔍</div><p>未找到匹配的网络事件</p>';
+                } else if (hasActiveNetworkWhitelist()) {
+                    emptyState.innerHTML = '<div class="empty-state-icon">🌐</div><p>暂无命中网络白名单的事件</p>';
+                } else {
+                    emptyState.innerHTML = '<div class="empty-state-icon">🌐</div><p>等待网络事件...</p>';
+                }
                 return;
             }
 
@@ -402,10 +410,57 @@
         }
 
         function filteredNetworkEvents() {
+            const whitelist = activeNetworkWhitelist();
+            const whitelistFiltered = networkEvents.filter(event => networkEventMatchesWhitelist(event, whitelist));
             if (!networkSearchQuery) {
-                return networkEvents;
+                return whitelistFiltered;
             }
-            return networkEvents.filter(event => networkEventSearchText(event).includes(networkSearchQuery));
+            return whitelistFiltered.filter(event => networkEventSearchText(event).includes(networkSearchQuery));
+        }
+
+        function activeNetworkWhitelist() {
+            const ips = new Set();
+            const ports = new Set();
+
+            networkWhitelistRules.forEach(rule => {
+                if (!rule.enabled) return;
+                if (rule.type === 'ip') {
+                    ips.add(String(rule.value).trim());
+                } else if (rule.type === 'port') {
+                    const port = Number(rule.value);
+                    if (Number.isInteger(port) && port > 0) {
+                        ports.add(port);
+                    }
+                }
+            });
+
+            return {
+                ips,
+                ports,
+                hasIP: ips.size > 0,
+                hasPort: ports.size > 0
+            };
+        }
+
+        function hasActiveNetworkWhitelist() {
+            const whitelist = activeNetworkWhitelist();
+            return whitelist.hasIP || whitelist.hasPort;
+        }
+
+        function networkEventMatchesWhitelist(event, whitelist) {
+            if (!whitelist.hasIP && !whitelist.hasPort) {
+                return true;
+            }
+
+            if (whitelist.hasIP && !whitelist.ips.has(String(event.src_ip)) && !whitelist.ips.has(String(event.dst_ip))) {
+                return false;
+            }
+
+            if (whitelist.hasPort && !whitelist.ports.has(Number(event.src_port)) && !whitelist.ports.has(Number(event.dst_port))) {
+                return false;
+            }
+
+            return true;
         }
 
         function networkEventSearchText(event) {
@@ -933,9 +988,160 @@
                 .catch(err => console.error('Failed to load alert config:', err));
         }
 
+        function loadNetworkWhitelist() {
+            fetch('/api/whitelist')
+                .then(res => res.json())
+                .then(data => {
+                    if (data.error) {
+                        throw new Error(data.error);
+                    }
+                    networkWhitelistRules = data
+                        .filter(rule => rule.type === 'ip' || rule.type === 'port')
+                        .sort((a, b) => {
+                            if (a.type === b.type) return String(a.value).localeCompare(String(b.value));
+                            return a.type.localeCompare(b.type);
+                        });
+                    renderNetworkWhitelist();
+                    renderNetworkEvents();
+                })
+                .catch(err => {
+                    setNetworkWhitelistStatus('规则加载失败');
+                    console.error('Failed to load network whitelist:', err);
+                });
+        }
+
+        function renderNetworkWhitelist() {
+            const tbody = document.getElementById('networkWhitelistBody');
+            const summary = document.getElementById('networkWhitelistSummary');
+            if (!tbody || !summary) return;
+
+            const enabledRules = networkWhitelistRules.filter(rule => rule.enabled);
+            const ipCount = enabledRules.filter(rule => rule.type === 'ip').length;
+            const portCount = enabledRules.filter(rule => rule.type === 'port').length;
+            summary.textContent = `启用 ${enabledRules.length} 条规则，IP ${ipCount} 条，端口 ${portCount} 条`;
+
+            if (networkWhitelistRules.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" class="empty-cell">暂无网络白名单规则</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = networkWhitelistRules.map(rule => {
+                const enabled = Boolean(rule.enabled);
+                const nextEnabled = enabled ? 'false' : 'true';
+                const toggleLabel = enabled ? '停用' : '启用';
+                const typeLabel = rule.type === 'ip' ? 'IP' : '端口';
+                return `
+                    <tr>
+                        <td><span class="whitelist-type">${typeLabel}</span></td>
+                        <td><span class="whitelist-value">${escapeHtml(rule.value)}</span></td>
+                        <td>${renderWhitelistStatus(enabled)}</td>
+                        <td>
+                            <div class="whitelist-actions">
+                                <button class="btn btn-secondary btn-small" onclick="toggleNetworkWhitelistRule(${Number(rule.id)}, ${nextEnabled})">${toggleLabel}</button>
+                                <button class="btn btn-danger btn-small" onclick="deleteNetworkWhitelistRule(${Number(rule.id)})">删除</button>
+                            </div>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function renderWhitelistStatus(enabled) {
+            return enabled
+                ? '<span class="status-badge status-enabled">已启用</span>'
+                : '<span class="status-badge status-disabled">已停用</span>';
+        }
+
+        function addNetworkWhitelistRule(event) {
+            event.preventDefault();
+
+            const type = document.getElementById('networkWhitelistType').value;
+            const valueEl = document.getElementById('networkWhitelistValue');
+            const value = valueEl.value.trim();
+            const enabled = document.getElementById('networkWhitelistEnabled').checked;
+            if (!value) return;
+
+            setNetworkWhitelistStatus('添加中...');
+            fetch('/api/whitelist', {
+                method: 'POST',
+                headers: mutationHeaders(true),
+                body: JSON.stringify({ type, value, enabled })
+            })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.error) {
+                        throw new Error(data.error);
+                    }
+                    valueEl.value = '';
+                    setNetworkWhitelistStatus('已添加');
+                    loadNetworkWhitelist();
+                    setTimeout(() => setNetworkWhitelistStatus(''), 2000);
+                })
+                .catch(err => {
+                    setNetworkWhitelistStatus('添加失败');
+                    alert('操作失败: ' + err.message);
+                });
+        }
+
+        function toggleNetworkWhitelistRule(id, enabled) {
+            setNetworkWhitelistStatus('更新中...');
+            fetch(`/api/whitelist/${id}`, {
+                method: 'PATCH',
+                headers: mutationHeaders(true),
+                body: JSON.stringify({ enabled })
+            })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.error) {
+                        throw new Error(data.error);
+                    }
+                    setNetworkWhitelistStatus('已更新');
+                    loadNetworkWhitelist();
+                    setTimeout(() => setNetworkWhitelistStatus(''), 2000);
+                })
+                .catch(err => {
+                    setNetworkWhitelistStatus('更新失败');
+                    alert('操作失败: ' + err.message);
+                });
+        }
+
+        function deleteNetworkWhitelistRule(id) {
+            setNetworkWhitelistStatus('删除中...');
+            fetch(`/api/whitelist/${id}`, {
+                method: 'DELETE',
+                headers: mutationHeaders(false)
+            })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.error) {
+                        throw new Error(data.error);
+                    }
+                    setNetworkWhitelistStatus('已删除');
+                    loadNetworkWhitelist();
+                    setTimeout(() => setNetworkWhitelistStatus(''), 2000);
+                })
+                .catch(err => {
+                    setNetworkWhitelistStatus('删除失败');
+                    alert('操作失败: ' + err.message);
+                });
+        }
+
+        function updateNetworkWhitelistPlaceholder() {
+            const type = document.getElementById('networkWhitelistType').value;
+            const input = document.getElementById('networkWhitelistValue');
+            if (!input) return;
+            input.placeholder = type === 'ip' ? '例如 192.168.1.10' : '例如 25665';
+        }
+
+        function setNetworkWhitelistStatus(text) {
+            const statusEl = document.getElementById('networkWhitelistStatus');
+            if (statusEl) statusEl.textContent = text;
+        }
+
         function openSettingsModal() {
             loadPolicyStatus();
             loadAlertConfig();
+            loadNetworkWhitelist();
             document.getElementById('settingsModal').classList.add('active');
         }
 
@@ -1101,6 +1307,35 @@
             div.textContent = text;
             return div.innerHTML;
         }
+
+        function mutationHeaders(jsonBody) {
+            const headers = {};
+            if (jsonBody) {
+                headers['Content-Type'] = 'application/json';
+            }
+            const token = (document.getElementById('adminTokenInput')?.value || adminToken || '').trim();
+            if (token) {
+                headers.Authorization = `Bearer ${token}`;
+            }
+            return headers;
+        }
+
+        function saveAdminToken(value) {
+            adminToken = value.trim();
+            if (adminToken) {
+                localStorage.setItem('sentinelAdminToken', adminToken);
+            } else {
+                localStorage.removeItem('sentinelAdminToken');
+            }
+        }
+
+        function initializeAdminTokenInput() {
+            const input = document.getElementById('adminTokenInput');
+            if (input) {
+                input.value = adminToken;
+            }
+            updateNetworkWhitelistPlaceholder();
+        }
         
         // ========== 模态框 ==========
         function showConfirm(message, onConfirm) {
@@ -1130,6 +1365,7 @@
         });
 
         // ========== 启动 ==========
+        initializeAdminTokenInput();
         connect();
         setInterval(updateRate, 100);
         setInterval(updateStats, 1000);

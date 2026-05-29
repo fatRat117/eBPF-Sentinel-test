@@ -11,7 +11,6 @@
 #define IP_PROTO_ICMP 1      // ICMP协议号
 
 // 采样配置 - 每N个包采样1个
-// 设置为100表示普通流量每100个包采样1个；可疑端口会绕过采样直接上报。
 #define SAMPLE_RATE 100
 
 // 网络事件结构体 - 用于向用户态传递网络数据包信息
@@ -285,8 +284,8 @@ static __always_inline int process_packet(struct __sk_buff *skb, u8 direction) {
     u32 src_ip = get_src_ip(ip_data, data_end);
     u32 dst_ip = get_dst_ip(ip_data, data_end);
     
-    // 白名单检查
-    if (!is_ip_whitelisted(src_ip) || !is_ip_whitelisted(dst_ip)) {
+    // IP白名单检查：启用后，只要源IP或目的IP任一命中就采集相关包。
+    if (!is_ip_whitelisted(src_ip) && !is_ip_whitelisted(dst_ip)) {
         return 0;
     }
     
@@ -299,8 +298,8 @@ static __always_inline int process_packet(struct __sk_buff *skb, u8 direction) {
     u16 src_port = get_src_port(transport_data, data_end, protocol);
     u16 dst_port = get_dst_port(transport_data, data_end, protocol);
     
-    // 端口白名单检查
-    if (!is_port_whitelisted(src_port) || !is_port_whitelisted(dst_port)) {
+    // 端口白名单检查：启用后，只要源端口或目的端口任一命中就采集相关包。
+    if (!is_port_whitelisted(src_port) && !is_port_whitelisted(dst_port)) {
         return 0;
     }
 

@@ -257,6 +257,47 @@
                 </div>
             </div>
 
+            <div class="policy-section whitelist-plugin">
+                <h3>网络白名单过滤插件</h3>
+                <div class="whitelist-plugin-header">
+                    <span id="networkWhitelistSummary">未加载规则</span>
+                    <span id="networkWhitelistStatus" class="config-status"></span>
+                </div>
+                <label class="admin-token-row">
+                    <span>管理员 Token</span>
+                    <input type="password" id="adminTokenInput" placeholder="远程写操作需要 SENTINEL_ADMIN_TOKEN" oninput="saveAdminToken(this.value)">
+                </label>
+                <form class="whitelist-form" onsubmit="addNetworkWhitelistRule(event)">
+                    <select id="networkWhitelistType" onchange="updateNetworkWhitelistPlaceholder()">
+                        <option value="port">端口</option>
+                        <option value="ip">IP 地址</option>
+                    </select>
+                    <input type="text" id="networkWhitelistValue" placeholder="例如 25665" required>
+                    <label class="inline-checkbox">
+                        <input type="checkbox" id="networkWhitelistEnabled" checked>
+                        <span>启用</span>
+                    </label>
+                    <button type="submit" class="btn btn-primary">添加规则</button>
+                </form>
+                <div class="whitelist-table-wrap">
+                    <table class="whitelist-table">
+                        <thead>
+                            <tr>
+                                <th>类型</th>
+                                <th>值</th>
+                                <th>状态</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="networkWhitelistBody">
+                            <tr>
+                                <td colspan="4" class="empty-cell">正在加载...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
             <div class="policy-section">
                 <h3>告警阈值</h3>
                 <form class="alert-config-grid" onsubmit="saveAlertConfig(event)">
